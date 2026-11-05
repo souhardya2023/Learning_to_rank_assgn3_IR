@@ -14,9 +14,9 @@
 ---
 
 A comprehensive implementation, empirical benchmark, and evaluation of **Learning to Rank (L2R)** algorithms evaluated on the standard **Cranfield 1,400** aeronautics collection. This project implements:
-1. **Method A: Boolean Weighted Zone Scoring** learned via fast vectorized simplex grid search optimizing Mean Average Precision (MAP).
-2. **Method B: Learning Real-Valued Weights using Linear Support Vector Machines (SVM)** trained on the exact 22 query-document ranking features.
-3. **Competitive Baselines:** Unweighted Zone Scoring, Vector Space Model (TF-IDF Cosine Similarity), and Okapi BM25 ($k_1=1.5, b=0.75$).
+1. **Method A: Boolean Weighted Zone Scoring** learned via fast vectorized simplex grid search optimizing Mean Average Precision (MAP), with per-query-term Boolean zone matching.
+2. **Method B: Learning Real-Valued Weights using Linear Support Vector Machines (SVM)** trained on the exact 22 query-document ranking features; pointwise vs. pairwise RankSVM, C and negative ratio chosen by inner cross-validation.
+3. **Competitive Baselines:** Unweighted Zone Scoring, Vector Space Model (TF-IDF Cosine Similarity), and Okapi BM25 ($k_1=1.2, b=0.75$).
 4. **Statistical Rigor:** Evaluated on an 80/20 train-test split (180 training, 45 test queries) and 5-fold cross-validation across all 225 queries.
 5. **Hierarchical Architecture:** Structured cleanly into `code/`, `data/`, and `results/` folders with a standalone prediction script (`code/predict.py`) for evaluating unseen test queries.
 
@@ -105,19 +105,16 @@ The Cranfield collection represents a foundational benchmark in information retr
 ## Methodology
 
 ### Method A: Boolean Weighted Zone Scoring
-For a query $q$ and document $d$, each zone $z \in \mathcal{Z} = \{\text{title}, \text{author}, \text{bibliography}, \text{body}\}$ receives a binary match indicator:
-$$s_z(q, d) = \begin{cases} 1 & \text{if } q \cap d_z \neq \emptyset \\ 0 & \text{otherwise} \end{cases}$$
+For a query $q$ and document $d$, each zone $z \in \{\text{title}, \text{author}, \text{bibliography}, \text{body}\}$ receives a Boolean match for **every distinct query term**; the zone input is the fraction of query terms found in the zone:
+$$s_z(q, d) = \frac{1}{|q|} \sum_{t \in q} \mathbb{1}[t \in d_z] \in [0,1]$$
 
-The overall document zone score is:
-$$S_A(q, d) = \sum_{z \in \mathcal{Z}} w_z \cdot s_z(q, d), \quad \text{subject to } \sum_{z \in \mathcal{Z}} w_z = 1, \; w_z \ge 0$$
+$$S_A(q, d) = \sum_z w_z \, s_z(q, d), \quad w_z \ge 0, \; \sum_z w_z = 1$$
 
-An exhaustive **Simplex Grid Search** with step size $\delta = 0.05$ evaluates all 1,771 valid weight quadruplets $(w_T, w_A, w_B, w_W)$. To ensure computational efficiency across 180 training queries ($180 \times 1400 = 252,000$ evaluations per candidate), candidate scoring is fully vectorized via BLAS matrix multiplication:
-$$\mathbf{P} = \mathbf{X}_q \mathbf{W}^T \in \mathbb{R}^{1400 \times 1771}$$
+An exhaustive **simplex grid search** (step 0.05, 1,771 weight vectors) maximizes MAP over the 180 training queries, vectorized as $\mathbf{P} = \mathbf{X}_q \mathbf{W}^T$. **Training and inference use the identical scoring/ordering function** (stable sort, ties by doc id; no hidden tie-breaker).
 
-**Learned Weights:** The MAP-optimal grid search converged to:
-$$(w_{\text{title}} = 0.55, \quad w_{\text{author}} = 0.05, \quad w_{\text{bibliography}} = 0.40, \quad w_{\text{body}} = 0.00)$$
+**Learned weights:** $(w_T, w_A, w_B, w_W) = (0.35, 0.25, 0.15, 0.25)$
 
-*Insight:* In specialized technical abstracts, title keywords and bibliographic citations carry high discriminative precision, whereas body keywords match non-specifically across the collection.
+*Notes:* the previous design used one coarse "any query term matches this zone" bit per zone. That saturates on the body zone and creates huge ties (held-out MAP 0.036); it is retained only as the ablation row `Method A (coarse any-term)`. Per-term Boolean matching lifts MAP to 0.262.
 
 ---
 
@@ -146,14 +143,14 @@ The system computes the exact 22 features required by the specification:
 | $f_{12}$ | `max_of_stream_length_norm_tf` | Maximum length-normalized term frequency |
 | $f_{13}$ | `mean_of_stream_length_norm_tf` | Mean length-normalized term frequency |
 | $f_{14}$ | `variance_of_stream_length_norm_tf`| Variance of length-normalized term frequencies |
-| $f_{15}$ | `sum_of_tf_idf` | Sum of TF-IDF scores: $\sum_{t \in q} (1 + \ln \text{tf}(t, d)) \cdot \text{idf}(t)$ |
+| $f_{15}$ | `sum_of_tf_idf` | Sum of TF-IDF scores: $\sum_{t \in q} \text{tf}(t, d) \cdot \text{idf}(t)$ |
 | $f_{16}$ | `min_of_tf_idf` | Minimum TF-IDF among matched query terms |
 | $f_{17}$ | `max_of_tf_idf` | Maximum TF-IDF among matched query terms |
 | $f_{18}$ | `mean_of_tf_idf` | Mean TF-IDF across all query terms |
 | $f_{19}$ | `variance_of_tf_idf` | Variance of TF-IDF scores across query terms |
-| $f_{20}$ | `boolean_model` | Exact Boolean conjunct match: $\mathbb{I}[\forall t \in q, t \in d]$ |
+| $f_{20}$ | `boolean_model` | Conjunctive (AND) Boolean match: $\mathbb{I}[\forall t \in q, t \in d]$ (now actually AND in the code) |
 | $f_{21}$ | `vector_space_model` | Cosine similarity under ltc.lnc weighting: $\cos(\mathbf{v}_q, \mathbf{v}_d)$ |
-| $f_{22}$ | `BM25` | Okapi BM25 score with $k_1 = 1.5, b = 0.75$ |
+| $f_{22}$ | `BM25` | Okapi BM25 score with $k_1 = 1.2, b = 0.75$ |
 
 #### Addressing IR Feature Skew with RobustScaler
 In information retrieval, lexical features exhibit heavy-tailed, power-law distributions. When standardized via conventional Z-score normalization ($\mu, \sigma$), extreme document lengths and raw term frequencies compress over 95% of documents near zero, crippling linear separation.
@@ -163,58 +160,58 @@ $$\hat{\phi}_j = \frac{\phi_j - \text{median}(\phi_j)}{Q_3(\phi_j) - Q_1(\phi_j)
 This preserves discrimination among competitive top candidates without allowing extreme document lengths to distort the ranking boundary.
 
 #### Optimization Details
-* **Objective:** L2-regularized Squared Hinge Loss with coordinate descent (`loss='squared_hinge'`, `dual=False`).
-* **Imbalance Handling:** Query-candidate negative sampling ($1:3$ positive-to-negative ratio) combined with `class_weight='balanced'`.
-* **Regularization:** Tuned to $C = 0.005$, preventing overfitting to dense low-level TF statistics while anchoring on high-level retrieval signals.
+* **Objective:** L2-regularized squared-hinge linear SVM (`LinearSVC`, primal). Two formulations: *pointwise* (relevant vs. sampled non-relevant docs, `class_weight='balanced'`) and *pairwise RankSVM* (SVM on feature differences of relevant/non-relevant pairs, no bias).
+* **Model selection:** inner 5-fold CV **on the training queries only**, maximizing MAP over the full 1,400-document ranking, over mode × C ∈ {0.0005…0.1} × negatives/positive ∈ {3, 10}. Selected on the 180 training queries: **pair, C = 0.0005, 3 negatives per positive**. Strong regularization is always selected.
+* **Final submission model** (`predict.py`): re-tuned and retrained on all 225 queries (point, C = 0.0005).
 
 ---
 
 ## Empirical Results
 
 ### Held-Out Test Set Performance
-Evaluated on the independent test partition (45 queries, 63,000 query-document candidate pairs):
+45 held-out queries (seed 42 split; 180 train). The last column is the **set-based** operating point: top-K\* list, where K\* maximizes mean F1 on the *training* queries (`K* (P/R/F1)`).
 
-| Model | P@5 | P@10 | P@20 | R@10 | R@20 | F1@10 | F1@20 | MAP | MRR | NDCG@10 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Unweighted Zone Baseline** | 0.0889 | 0.0711 | 0.0556 | 0.1189 | 0.1844 | 0.0827 | 0.0792 | 0.0934 | 0.2015 | 0.1147 |
-| **Method A (Zone Scoring)** | 0.1556 | 0.1267 | 0.0967 | 0.2144 | 0.3168 | 0.1472 | 0.1384 | 0.1706 | 0.3702 | 0.2035 |
-| **VSM Baseline (TF-IDF)** | 0.3378 | 0.2511 | 0.1733 | 0.3953 | 0.5122 | 0.2796 | 0.2370 | **0.3276** | 0.5574 | 0.3929 |
-| **Okapi BM25 Baseline** | 0.3244 | 0.2511 | 0.1733 | 0.3804 | 0.5122 | 0.2743 | 0.2370 | 0.3226 | 0.5621 | 0.3888 |
-| **Method B (Linear SVM)** | **0.3422** | **0.2556** | **0.1800** | **0.4038** | **0.5326** | **0.2824** | **0.2452** | 0.3195 | **0.5761** | **0.4041** |
+| Model | P@5 | P@10 | P@20 | R@10 | R@20 | F1@10 | F1@20 | MAP | MRR | NDCG@10 | K* (P/R/F1) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Unweighted Zone** | 0.2844 | 0.2089 | 0.1500 | 0.3458 | 0.4417 | 0.2358 | 0.2087 | 0.2529 | 0.4835 | 0.3225 | 7 (0.238/0.297/0.236) |
+| **Method A, coarse any-term (ablation)** | 0.0222 | 0.0267 | 0.0233 | 0.0328 | 0.0603 | 0.0274 | 0.0309 | 0.0361 | 0.0694 | 0.0272 | 47 (0.023/0.164/0.038) |
+| **Method A (Zone Scoring)** | 0.2933 | 0.2244 | 0.1522 | 0.3680 | 0.4458 | 0.2540 | 0.2114 | 0.2623 | 0.5116 | 0.3420 | 6 (0.281/0.301/0.261) |
+| **VSM (TF-IDF)** | 0.3689 | 0.2578 | 0.1789 | 0.4036 | 0.5310 | 0.2848 | 0.2500 | 0.3270 | 0.5951 | 0.4072 | 6 (0.322/0.318/0.285) |
+| **Okapi BM25** | 0.3244 | 0.2511 | 0.1733 | 0.3804 | 0.5122 | 0.2743 | 0.2418 | 0.3226 | 0.5622 | 0.3888 | 6 (0.304/0.301/0.269) |
+| **Method B (Linear SVM)** | 0.3333 | 0.2556 | 0.1789 | 0.3975 | 0.5293 | 0.2822 | 0.2500 | 0.3173 | 0.5884 | 0.3980 | 8 (0.278/0.358/0.280) |
 
-> **Key Takeaway:** Method B outperforms Okapi BM25 and VSM across **P@5, P@10, P@20, R@10, R@20, F1@10, F1@20, MRR, and NDCG@10**.
+> **Honest takeaway:** Method A improved massively over its previous version (MAP 0.17 → 0.26) but remains below the full-text models. Method B is **on par** with BM25/VSM (differences are within fold-to-fold variance); with 22 features that are all functions of the same tf/idf/length statistics, a linear model cannot meaningfully beat its best single feature on Cranfield.
 
 ---
 
 ### 5-Fold Cross-Validation
-Across all 225 queries ($5 \times 45$ validation queries):
+All 225 queries, 5 folds; Method A's grid search and Method B's hyper-parameters are **re-tuned inside every training fold** (nested), mean ± std over folds.
 
-| Metric | Method A (Tuned) | VSM Baseline | Okapi BM25 Baseline | Method B (Linear SVM) |
+| Model | P@10 | R@10 | F1@10 | MAP |
 | :--- | :---: | :---: | :---: | :---: |
-| **Precision@10** | $0.1360 \pm 0.0163$ | $0.2453 \pm 0.0305$ | $0.2382 \pm 0.0249$ | **$0.2462 \pm 0.0297$** |
-| **Recall@10** | $0.2388 \pm 0.0315$ | $0.4190 \pm 0.0526$ | $0.3998 \pm 0.0416$ | **$0.4149 \pm 0.0461$** |
-| **F1-Score@10** | $0.1580 \pm 0.0165$ | $0.2779 \pm 0.0270$ | $0.2697 \pm 0.0205$ | **$0.2785 \pm 0.0232$** |
-| **MAP** | $0.1632 \pm 0.0142$ | **$0.3340 \pm 0.0287$** | $0.3217 \pm 0.0253$ | $0.3155 \pm 0.0226$ |
+| **Unweighted Zone** | 0.2067 ± 0.0224 | 0.3633 ± 0.0322 | 0.2381 ± 0.0209 | 0.2640 ± 0.0140 |
+| **Method A, coarse any-term (ablation)** | 0.0240 ± 0.0068 | 0.0376 ± 0.0143 | 0.0260 ± 0.0059 | 0.0428 ± 0.0045 |
+| **Method A (Zone Scoring)** | 0.2120 ± 0.0216 | 0.3673 ± 0.0322 | 0.2430 ± 0.0195 | 0.2709 ± 0.0152 |
+| **VSM (TF-IDF)** | 0.2453 ± 0.0392 | 0.4159 ± 0.0334 | 0.2779 ± 0.0329 | 0.3200 ± 0.0223 |
+| **Okapi BM25** | 0.2382 ± 0.0339 | 0.3998 ± 0.0325 | 0.2697 ± 0.0291 | 0.3181 ± 0.0244 |
+| **Method B (Linear SVM)** | 0.2493 ± 0.0276 | 0.4146 ± 0.0294 | 0.2803 ± 0.0225 | 0.3193 ± 0.0217 |
 
 ---
 
-### Learned Linear SVM Feature Weights
+### Learned Linear SVM Feature Weights (held-out split model, RobustScaler units)
 
-The learned feature coefficients provide clear interpretability into the ranking mechanism:
+| Rank | Feature | SVM Weight |
+| :---: | :--- | :---: |
+| 1 | `vector_space_model` | +0.1603 |
+| 2 | `stream_length` | -0.1225 |
+| 3 | `sum_of_tf_idf` | +0.0752 |
+| 4 | `query_term_ratio` | -0.0663 |
+| 5 | `mean_of_tf_idf` | +0.0649 |
+| 6 | `sum_of_stream_length_normalized_term_frequency` | +0.0599 |
+| 7 | `min_of_stream_length_normalized_term_frequency` | -0.0593 |
+| 8 | `BM25` | +0.0573 |
 
-| Rank | Feature | SVM Weight ($w_j$) | Role in Ranking |
-| :---: | :--- | :---: | :--- |
-| 1 | `vector_space_model` ($f_{21}$) | **+0.3049** | Primary angle/cosine alignment |
-| 2 | `BM25` ($f_{22}$) | **+0.2278** | Primary non-linear term saturation |
-| 3 | `max_of_tf_idf` ($f_{17}$) | **+0.1836** | Peak salience across query terms |
-| 4 | `mean_of_tf_idf` ($f_{18}$) | **+0.1445** | Average thematic relevance |
-| 5 | `sum_of_tf_idf` ($f_{15}$) | **+0.1018** | Cumulative query match weight |
-| 6 | `idf` ($f_4$) | **+0.0768** | Rare term coverage |
-| 7 | `query_term_ratio` ($f_2$) | **+0.0543** | Breadth of query overlap |
-| 8 | `boolean_model` ($f_{20}$) | **+0.0478** | Strict conjunct bonus |
-| ... | ... | ... | ... |
-| 21 | `variance_of_term_freq` ($f_9$) | **-0.0886** | Penalizes unbalanced term repetitions |
-| 22 | `stream_length` ($f_3$) | **-0.1245** | Corrects document verbosity bias |
+Individual weights of correlated features should not be read in isolation (negative weights act as corrections for double counting).
 
 ---
 
@@ -265,33 +262,33 @@ Use `code/predict.py` to evaluate arbitrary new query files formatted according 
 ```bash
 # Rank using the top-performing Linear SVM (Method B)
 python code/predict.py \
-    --queries data/cran/cran.qry \
+    --queries data/TEST/query.txt \
     --output results/predictions_svm.txt \
     --method svm \
     --top_k 100
 
 # Rank using Method A (Boolean Weighted Zone Scoring)
 python code/predict.py \
-    --queries data/cran/cran.qry \
+    --queries data/TEST/query.txt \
     --output results/predictions_zone.txt \
     --method zone \
     --top_k 100
 
 # Rank using Okapi BM25 baseline
 python code/predict.py \
-    --queries data/cran/cran.qry \
+    --queries data/TEST/query.txt \
     --output results/predictions_bm25.txt \
     --method bm25 \
     --top_k 100
 ```
 
 #### Output File Format
-Prediction files adhere strictly to standard TREC/IR ranking formatting:
+`predict.py` writes two files per run: the full top-`--top_k` ranking (`<output>`) and a set-based list truncated at the F1-optimal cutoff K* (`<output>_cutoff.txt`, override with `--cutoff`). Note: relevance grade −1 (source document) is treated as non-relevant. Format:
 ```text
-<query_id> <rank> <doc_id> <score>
-1 1 184 1.849201
-1 2 29 1.621043
-1 3 31 1.487192
+<query_id>\t<doc_id>\t<rank>\t<score>
+1	51	1	2.194424
+1	486	2	1.336100
+1	184	3	1.269558
 ...
 ```
 

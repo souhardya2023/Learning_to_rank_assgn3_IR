@@ -85,6 +85,16 @@ def build_pdf_report(output_filename=None):
     cv_res = exp_data['cv_summary']
     method_a_w = exp_data['method_a_weights']
     svm_w = exp_data['method_b_weights']
+    tB = test_res['Method B (Linear SVM L2R)']; tA = test_res['Method A (Weighted Zone)']
+    tU = test_res['Unweighted Zone']; tAny = test_res['Method A (coarse any-term)']
+    tV = test_res['VSM (TF-IDF Cosine)']; tM = test_res['Okapi BM25']
+    cvB = cv_res['Method B (Linear SVM L2R)']; cvA = cv_res['Method A (Weighted Zone)']
+    cvV = cv_res['VSM (TF-IDF Cosine)']; cvM = cv_res['Okapi BM25']; cvAny = cv_res['Method A (coarse any-term)']
+    cut = exp_data['cutoff_results']; bestk = exp_data['best_k']
+    wany = exp_data['method_a_any_weights']
+    top_w = sorted(svm_w.items(), key=lambda x: -abs(x[1]))[:4]
+    mode_txt = 'pairwise RankSVM' if exp_data['method_b_mode'] == 'pair' else 'pointwise'
+    fin = exp_data['final']
     
     doc = SimpleDocTemplate(
         output_filename,
@@ -242,7 +252,7 @@ def build_pdf_report(output_filename=None):
     # ABSTRACT / EXECUTIVE SUMMARY
     story.append(Paragraph("Executive Summary", h2_style))
     story.append(Paragraph(
-        "Learning to Rank (L2R) modernizes traditional information retrieval by framing ranked document retrieval as a machine learning optimization problem. This report presents the design, mathematical formulation, empirical evaluation, and deep qualitative analysis of two distinct Learning to Rank methodologies implemented on the Cranfield aeronautical test collection: (1) <b>Method A: Boolean Weighted Zone Scoring</b>, which explores the parametric weight simplex across four document structural zones (Title, Author, Bibliography, and Text Body) via exhaustive grid search optimization; and (2) <b>Method B: Real-Valued Linear Support Vector Machines (SVM)</b>, which extracts 22 NLP and statistical retrieval features per query-document pair to train a maximal-margin hyperplane separator. Using standard Cranfield relevance judgments, both models are benchmarked against classic retrieval models including Unweighted Zone Scoring, the Vector Space Model (TF-IDF Cosine), and Okapi BM25 across an 80/20 train/test partition (180 train queries, 45 held-out test queries) and 5-fold cross-validation. Method B learns to place decisive positive weights on BM25 (+0.2582), VSM (+0.3090), and maximum TF-IDF (+0.2122), achieving top ranking precision (P@5 = 0.3111, MRR = 0.5448).",
+        "Learning to Rank (L2R) modernizes traditional information retrieval by framing ranked document retrieval as a machine learning optimization problem. This report presents the design, mathematical formulation, empirical evaluation, and deep qualitative analysis of two distinct Learning to Rank methodologies implemented on the Cranfield aeronautical test collection: (1) <b>Method A: Boolean Weighted Zone Scoring</b>, which explores the parametric weight simplex across four document structural zones (Title, Author, Bibliography, and Text Body) via exhaustive grid search optimization; and (2) <b>Method B: Real-Valued Linear Support Vector Machines (SVM)</b>, which extracts 22 NLP and statistical retrieval features per query-document pair to train a maximal-margin hyperplane separator. Using standard Cranfield relevance judgments, both models are benchmarked against classic retrieval models including Unweighted Zone Scoring, the Vector Space Model (TF-IDF Cosine), and Okapi BM25 across an 80/20 train/test partition (180 train queries, 45 held-out test queries) and 5-fold cross-validation. On the held-out queries Method A with term-level Boolean zone matching reaches MAP = " + f"{tA['MAP']:.3f}" + " (coarse any-term variant: " + f"{tAny['MAP']:.3f}" + "), and Method B (" + mode_txt + " linear SVM) reaches MAP = " + f"{tB['MAP']:.3f}" + ", P@5 = " + f"{tB['P@5']:.3f}" + ", MRR = " + f"{tB['MRR']:.3f}" + ", on par with BM25 (" + f"{tM['MAP']:.3f}" + ") and VSM (" + f"{tV['MAP']:.3f}" + "); 5-fold CV confirms this ordering.",
         body_style
     ))
     story.append(Spacer(1, 6))
@@ -347,8 +357,9 @@ def build_pdf_report(output_filename=None):
     ))
     story.append(Spacer(1, 3))
     story.append(Paragraph(
-        "For each zone <i>z</i> &isin; Z, we evaluate the <b>individual Boolean matching score</b> <i>s<sub>z</sub>(q, d)</i> &isin; {0, 1}:<br/>"
-        "<b><i>s<sub>z</sub>(q, d) = 1</i> &nbsp; if &nbsp; &exist; <i>t</i> &isin; <i>q</i> such that <i>t</i> &isin; Zone<sub><i>z</i></sub>(<i>d</i>), &nbsp; else &nbsp; <i>0</i></b>",
+        "For each zone <i>z</i> &isin; Z, we evaluate the <b>Boolean matching score</b> of every distinct query term against the zone (1 if the term occurs in the zone, else 0) and average it over the query terms:<br/>"
+        "<b><i>s<sub>z</sub>(q, d) = (1/|q|) &middot; &Sigma;<sub>t &isin; q</sub> [ t &isin; Zone<sub><i>z</i></sub>(d) ]</i> &isin; [0, 1]</b><br/>"
+        "(A single 'any term matches' bit per zone was also tested as an ablation: it saturates on the body zone and gives MAP of only " + f"{tAny['MAP']:.3f}" + ".)",
         body_style
     ))
     story.append(Spacer(1, 3))
@@ -361,18 +372,13 @@ def build_pdf_report(output_filename=None):
 
     story.append(Paragraph("Optimization Framework: Grid Search over the Weight Simplex", h2_style))
     story.append(Paragraph(
-        "To learn the optimal zone weights <b>w</b>*, we explore the standard 3-simplex &Delta;<sup>3</sup> = {<b>w</b> &isin; &real;<sup>4</sup> : <i>w<sub>z</sub></i> &ge; 0, &Sigma; <i>w<sub>z</sub></i> = 1} using a discrete grid with resolution &delta; = 0.05, yielding |C| = 1,771 candidate configurations. We implement and contrast two objective criteria:",
+        "To learn the optimal zone weights <b>w</b>*, we explore the standard 3-simplex &Delta;<sup>3</sup> = {<b>w</b> &isin; &real;<sup>4</sup> : <i>w<sub>z</sub></i> &ge; 0, &Sigma; <i>w<sub>z</sub></i> = 1} using a discrete grid with resolution &delta; = 0.05, yielding |C| = 1,771 candidate configurations. The objective is the ranking metric itself:",
         body_style
     ))
     story.append(Spacer(1, 2))
     story.append(Paragraph(
-        "1. <b>Direct Ranking Metric Optimization (MAP):</b><br/>"
         "<b>w*<sub>MAP</sub> = argmax<sub>w &isin; C</sub> &nbsp; (1 / |Q<sub>train</sub>|) &middot; &Sigma;<sub>q</sub> AP(q; w)</b><br/>"
-        "where documents are sorted by <i>S(q, d)</i> descending. To evaluate 1,771 candidates across 180 training queries in real time, our implementation vectorizes the scoring step as a single matrix product <b>P = X<sub>q</sub> W<sup>T</sup></b> &isin; &real;<sup>1400 &times; 1771</sup> and computes Average Precision via cumulative hit vectors.<br/><br/>"
-        "2. <b>Mean Squared Error (MSE) Optimization:</b><br/>"
-        "Following classic zone scoring (Manning et al., Sec. 6.1.1), weights are learned to minimize squared error against true relevance <i>y</i> &isin; {0, 1}:<br/>"
-        "<b>w*<sub>MSE</sub> = argmin<sub>w &isin; C</sub> &nbsp; (1 / |Q|N) &middot; &Sigma;<sub>q, d</sub> (y(q, d) &minus; w<sup>T</sup> s(q, d))<sup>2</sup> = argmin<sub>w &isin; C</sub> [ w<sup>T</sup> A w &minus; 2 w<sup>T</sup> b + c ]</b><br/>"
-        "where <b>A = &Sigma; X<sub>q</sub><sup>T</sup> X<sub>q</sub></b> &isin; &real;<sup>4 &times; 4</sup> and <b>b = &Sigma; X<sub>q</sub><sup>T</sup> y<sub>q</sub></b> &isin; &real;<sup>4</sup> are precomputed sufficient statistics.",
+        "Documents are sorted by <i>S(q, d)</i> descending (stable sort, ties broken by document id). <b>Exactly the same scoring and ordering function is used for training and for inference</b>; no hidden tie-breaking heuristic is applied at test time, so the optimised objective is the deployed ranking. To evaluate 1,771 candidates on 180 training queries quickly, scoring is vectorised as a single matrix product <b>P = X<sub>q</sub> W<sup>T</sup></b> &isin; &real;<sup>1400 &times; 1771</sup> and AP is computed from cumulative hit vectors. Learned weights: <b>w*</b> = (T, A, B, W) = (" + ", ".join(f"{x:.2f}" for x in method_a_w) + ").",
         body_style
     ))
     story.append(Spacer(1, 4))
@@ -382,7 +388,7 @@ def build_pdf_report(output_filename=None):
     if os.path.exists(chart4_file):
         story.append(Image(chart4_file, width=470, height=185))
         story.append(Spacer(1, 2))
-        story.append(Paragraph("<b>Figure 1:</b> Learned Zone Weight distributions under MAP maximization vs. MSE minimization.", callout_style))
+        story.append(Paragraph("<b>Figure 1:</b> Learned zone weights: term-level Boolean zones (final) vs. coarse any-term zones (ablation).", callout_style))
 
     story.append(PageBreak())
 
@@ -391,7 +397,7 @@ def build_pdf_report(output_filename=None):
     # =========================================================================
     story.append(Paragraph("3.2 Method B: Learning Real-Valued Weights via Linear SVM", h1_style))
     story.append(Paragraph(
-        "Method B frames document ranking under the supervised <b>Learning to Rank (L2R)</b> paradigm using <b>Support Vector Machines (SVM)</b>. For every query-document pair (<i>q, d</i>), we construct a 22-dimensional feature vector <b>x</b>(<i>q, d</i>) &isin; &real;<sup>22</sup>. A linear SVM learns a decision hyperplane parameterized by weight vector <b>w</b> &isin; &real;<sup>22</sup> and bias <i>b</i> &isin; &real; that separates relevant documents from non-relevant documents with maximal margin.",
+        "Method B frames document ranking under the supervised <b>Learning to Rank (L2R)</b> paradigm using <b>Support Vector Machines (SVM)</b>. For every query-document pair (<i>q, d</i>), we construct a 22-dimensional feature vector <b>x</b>(<i>q, d</i>) &isin; &real;<sup>22</sup>. A linear SVM learns a decision hyperplane parameterized by weight vector <b>w</b> &isin; &real;<sup>22</sup> and bias <i>b</i> &isin; &real; that separates relevant documents from non-relevant documents with maximal margin. Two linear-SVM formulations are considered: <b>pointwise</b> (relevant vs. non-relevant documents) and <b>pairwise RankSVM</b> (the SVM separates the feature difference x(d<sup>+</sup>) &minus; x(d<sup>&minus;</sup>) of a relevant and a non-relevant document of the same query, no bias term). The formulation is selected by cross-validation.",
         body_style
     ))
     story.append(Spacer(1, 4))
@@ -408,8 +414,8 @@ def build_pdf_report(output_filename=None):
     story.append(Paragraph("Real-Valued Ranking Function", h2_style))
     story.append(Paragraph(
         "At retrieval time, the learned weight vector <b>w</b> assigns a continuous, real-valued ranking score to any query-document pair equal to the signed perpendicular distance from the decision boundary:<br/>"
-        "<b>S(q, d) = w<sup>T</sup> x&#771;(q, d) + b = &Sigma;<sub>j=1..22</sub> w<sub>j</sub> &middot; ((x<sub>j</sub>(q, d) &minus; &mu;<sub>j</sub>) / &sigma;<sub>j</sub>) + b</b><br/>"
-        "Documents are ranked in strictly descending order of <i>S(q, d)</i>. Documents with higher positive scores possess features that project strongly along the positive margin, reflecting high confidence of relevance.",
+        "<b>S(q, d) = w<sup>T</sup> x&#771;(q, d) + b = &Sigma;<sub>j=1..22</sub> w<sub>j</sub> &middot; ((x<sub>j</sub>(q, d) &minus; med<sub>j</sub>) / IQR<sub>j</sub>) + b</b><br/>"
+        "Documents are ranked in strictly descending order of <i>S(q, d)</i>. Documents with higher scores possess features that project strongly along the positive margin, reflecting high confidence of relevance.",
         body_style
     ))
     story.append(Spacer(1, 4))
@@ -419,14 +425,14 @@ def build_pdf_report(output_filename=None):
         "A major challenge in Cranfield L2R is extreme class imbalance: out of 180 &times; 1,400 = 252,000 possible training pairs, only ~1,400 are relevant (&lt;0.6%). If an SVM is trained naively on all pairs, it trivially collapses to predicting non-relevant. We resolve this through a two-stage strategy:<br/>"
         "1. <b>Candidate Selection:</b> For each training query, we retain all ground-truth relevant documents (<i>y</i> = +1) and sample negative documents (<i>y</i> = &minus;1) from candidates that share at least one vocabulary term with the query.<br/>"
         "2. <b>Class Weight Balancing:</b> We assign cost weights inversely proportional to class frequencies: <i>C</i><sub>+</sub> = <i>C</i> &middot; (<i>M</i> / 2<i>M</i><sub>+</sub>), &nbsp; <i>C</i><sub>&minus;</sub> = <i>C</i> &middot; (<i>M</i> / 2<i>M</i><sub>&minus;</sub>), ensuring the optimizer penalizes misclassified positive instances heavily.<br/>"
-        "3. <b>Standardization:</b> Features exhibit disparate scales (stream length ~ 100, cosine similarity &isin; [0, 1]). We fit a <code>StandardScaler</code> strictly on the training partition: x&#771;<sub>j</sub> = (<i>x<sub>j</sub></i> &minus; &mu;<sub>j</sub>) / &sigma;<sub>j</sub>.",
+        "3. <b>Standardization:</b> Features exhibit disparate scales (stream length ~ 100, cosine similarity &isin; [0, 1]). Features are heavy-tailed, so we fit a <code>RobustScaler</code> (median / inter-quartile range) strictly on the training queries.",
         body_style
     ))
     story.append(Spacer(1, 5))
 
     story.append(Paragraph("Hyperparameter Optimization", h2_style))
     story.append(Paragraph(
-        "The regularization constant <i>C</i> is tuned via held-out validation on 40 validation queries over <i>C</i> &isin; {0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0}. Validation MAP peaked at <i>C</i> = 0.005, indicating that moderate regularization prevents overfitting to query-specific vocabulary noise while enabling robust generalization.",
+        "Training formulation (pointwise / pairwise), the regularization constant <i>C</i> &isin; {0.0005, 0.001, 0.005, 0.01, 0.05, 0.1} and the negatives-per-positive ratio &isin; {3, 10} are selected by <b>inner 5-fold cross-validation on the 180 training queries only</b>, maximising MAP over the full 1,400-document ranking. Selected: <b>" + mode_txt + ", C = " + str(exp_data['method_b_C']) + ", " + str(exp_data['method_b_neg_ratio']) + " negatives per positive</b> (inner-CV MAP = " + f"{exp_data['method_b_tuning']['cv_map']:.4f}" + "). Strong regularisation wins consistently: with only ~22 highly correlated features, a large C over-fits query-specific term statistics. The final submission model is re-tuned and re-trained on all 225 judged queries (" + fin['method_b_mode'] + ", C = " + str(fin['method_b_C']) + ").",
         body_style
     ))
     story.append(PageBreak())
@@ -462,7 +468,7 @@ def build_pdf_report(output_filename=None):
         [Paragraph("17", table_cell), Paragraph("<b>max of tf*idf</b>", table_cell_left), Paragraph("max<sub>t &isin; q</sub> [tf(t, d) &middot; idf(t)]", table_cell_left), Paragraph("Strongest single term-salience indicator.", table_cell_left)],
         [Paragraph("18", table_cell), Paragraph("<b>mean of tf*idf</b>", table_cell_left), Paragraph("(1/|q|) &middot; &Sigma;<sub>t &isin; q</sub> tf(t, d) &middot; idf(t)", table_cell_left), Paragraph("Average TF-IDF payload per query token.", table_cell_left)],
         [Paragraph("19", table_cell), Paragraph("<b>variance of tf*idf</b>", table_cell_left), Paragraph("(1/|q|) &middot; &Sigma;<sub>t &isin; q</sub> (w<sub>td</sub> &minus; &mu;<sub>w</sub>)<sup>2</sup>", table_cell_left), Paragraph("Spread of term weights across the query.", table_cell_left)],
-        [Paragraph("20", table_cell), Paragraph("<b>boolean model</b>", table_cell_left), Paragraph("1 if |q &cap; d| &gt; 0 else 0", table_cell_left), Paragraph("Boolean coordinate match indicator (0 or 1).", table_cell_left)],
+        [Paragraph("20", table_cell), Paragraph("<b>boolean model</b>", table_cell_left), Paragraph("1 if q &sube; d else 0", table_cell_left), Paragraph("Conjunctive (AND) Boolean match: every query term occurs in d.", table_cell_left)],
         [Paragraph("21", table_cell), Paragraph("<b>vector space model</b>", table_cell_left), Paragraph("(V<sub>q</sub> &middot; V<sub>d</sub>) / (||V<sub>q</sub>|| ||V<sub>d</sub>||)", table_cell_left), Paragraph("Cosine similarity in sublinear TF-IDF vector space.", table_cell_left)],
         [Paragraph("22", table_cell), Paragraph("<b>BM25</b>", table_cell_left), Paragraph("&Sigma;<sub>t</sub> idf(t) [tf(k<sub>1</sub>+1)/(tf+k<sub>1</sub>(1-b+b&middot;L<sub>d</sub>/L<sub>avg</sub>))]", table_cell_left), Paragraph("Okapi BM25 score with k<sub>1</sub>=1.2, b=0.75.", table_cell_left)]
     ]
@@ -541,7 +547,7 @@ def build_pdf_report(output_filename=None):
 
     story.append(Paragraph("5.1 Performance on Held-Out Test Queries (N=45)", h2_style))
     story.append(Paragraph(
-        "Table 3 summarizes the retrieval effectiveness of all five systems evaluated across cutoffs <i>K</i> &isin; {5, 10, 20}, MAP, MRR, and NDCG@10 on the test query set.",
+        "Table 3 summarizes the retrieval effectiveness of all six systems evaluated across cutoffs <i>K</i> &isin; {5, 10, 20}, MAP, MRR, and NDCG@10 on the test query set.",
         body_style
     ))
     story.append(Spacer(1, 3))
@@ -549,6 +555,7 @@ def build_pdf_report(output_filename=None):
     m_names = [
         "Unweighted Zone",
         "Method A (Weighted Zone)",
+        "Method A (coarse any-term)",
         "VSM (TF-IDF Cosine)",
         "Okapi BM25",
         "Method B (Linear SVM L2R)"
@@ -605,9 +612,9 @@ def build_pdf_report(output_filename=None):
     story.append(Spacer(1, 4))
     story.append(Paragraph(
         "<b>Key Test Findings:</b><br/>"
-        "• <b>Zone Scoring vs. Full Text Models:</b> Both Unweighted Zone (MAP = 0.1746) and Method A Weighted Zone (MAP = 0.1787) underperform TF-IDF models because binary matching ignores term frequencies and document lengths.<br/>"
-        "• <b>Method A Optimization Gain:</b> Grid search learned weights (0.55, 0.05, 0.40, 0.00) outperform the unweighted baseline across all metrics, lifting MAP from 0.1746 to 0.1787 and P@5 from 0.1822 to 0.1867.<br/>"
-        "• <b>Method B Retrieval Quality:</b> Linear SVM achieves strong top-rank precision (P@5 = 0.3111, MRR = 0.5448, NDCG@10 = 0.3565), outperforming Method A by +67% in P@5 and +74% in MRR.",
+        "• <b>Method A:</b> term-level Boolean zone matching with MAP-trained weights " + str(tuple(round(x,2) for x in method_a_w)) + " raises MAP from " + f"{tAny['MAP']:.3f}" + " (coarse any-term zones) to " + f"{tA['MAP']:.3f}" + " and beats unweighted zones (" + f"{tU['MAP']:.3f}" + "). It stays below full-text models since binary matches ignore term frequency and document length.<br/>"
+        "• <b>Method B</b> reaches P@5 = " + f"{tB['P@5']:.3f}" + ", MRR = " + f"{tB['MRR']:.3f}" + ", MAP = " + f"{tB['MAP']:.3f}" + " -- statistically indistinguishable from BM25/VSM (differences are well within the fold-to-fold std in Table 4): the 22 features are dominated by monotone transformations of the same tf/idf statistics, so a linear model cannot do much better than its best single feature.<br/>"
+        "• <b>Set-based view</b> (cutoff K* = F1-optimal K on the training queries): Method B K*=" + str(bestk['Method B (Linear SVM L2R)']) + " gives P/R/F1 = " + f"{cut['Method B (Linear SVM L2R)']['P']:.3f}/{cut['Method B (Linear SVM L2R)']['R']:.3f}/{cut['Method B (Linear SVM L2R)']['F1']:.3f}" + "; BM25 K*=" + str(bestk['Okapi BM25']) + " gives " + f"{cut['Okapi BM25']['P']:.3f}/{cut['Okapi BM25']['R']:.3f}/{cut['Okapi BM25']['F1']:.3f}" + "; Method A K*=" + str(bestk['Method A (Weighted Zone)']) + " gives " + f"{cut['Method A (Weighted Zone)']['P']:.3f}/{cut['Method A (Weighted Zone)']['R']:.3f}/{cut['Method A (Weighted Zone)']['F1']:.3f}" + ".",
         body_style
     ))
     story.append(PageBreak())
@@ -703,11 +710,11 @@ def build_pdf_report(output_filename=None):
 
     story.append(Spacer(1, 4))
     story.append(Paragraph(
-        "<b>Insights from SVM Weight Analysis:</b><br/>"
-        "1. <b>Dominance of Established Scoring Signals:</b> The model assigned its highest positive weights to <code>vector_space_model</code> (+0.3090) and <code>BM25</code> (+0.2582). This confirms that continuous non-linear TF-IDF and term saturation curves remain the strongest predictors of document relevance.<br/>"
-        "2. <b>Saliency via Max TF*IDF:</b> Feature 17 (<code>max_of_tf_idf</code>) received a substantial positive weight (+0.2122). In Cranfield's technical aeronautics corpus, if a document exhibits an extremely high TF-IDF for even one central technical term (e.g., 'slipstream', 'boundary-layer'), it is highly predictive of relevance.<br/>"
-        "3. <b>Document Length & Term Density Interactions:</b> Normalized term frequency features (<code>max_of_stream_length_normalized_term_frequency</code>: +0.0864, <code>sum_of_stream_length_normalized_term_frequency</code>: +0.0839) act as length penalizers, boosting compact, focused abstracts over verbose documents.<br/>"
-        "4. <b>Negative Feature Weights:</b> Features such as raw query term count, IDF sum, or raw TF variance receive negative or suppressed weights. In linear models with correlated inputs (multicollinearity), negative weights serve as <i>partial correction factors</i> that offset double-counting between BM25, VSM, and raw TF sums.",
+        "<b>Insights from SVM Weight Analysis:</b> (weights are in RobustScaler units)<br/>"
+        "1. <b>Largest-magnitude weights:</b> " + "; ".join(f"<code>{n}</code> ({w:+.3f})" for n, w in top_w) + ". The model leans on the cosine/TF-IDF family (VSM, BM25, summed TF-IDF), confirming that sub-linear tf with idf weighting remains the strongest relevance signal in Cranfield.<br/>"
+        "2. <b>Length correction:</b> <code>stream_length</code> receives a negative weight (" + f"{svm_w['stream_length']:+.3f}" + "), a learned penalty for long documents that match many terms by chance.<br/>"
+        "3. <b>Negative weights on correlated features</b> (e.g. <code>query_term_ratio</code>: " + f"{svm_w['query_term_ratio']:+.3f}" + ") act as correction terms that offset double counting between BM25, VSM and the raw TF/TF-IDF aggregates (multicollinearity); individual weights should not be read in isolation.<br/>"
+        "4. <b>Why B is only on par with BM25:</b> every feature is a function of the same per-term tf, idf and document length; the best linear mix is therefore close to the best single feature. Heavy regularisation (small C) was selected for this reason. Because the weights are tuned for MAP via CV, the SVM is the most stable of the learned rankers across folds, but not significantly better than BM25/VSM.",
         body_style
     ))
     story.append(PageBreak())
@@ -717,10 +724,11 @@ def build_pdf_report(output_filename=None):
     # =========================================================================
     story.append(Paragraph("6.2 Method A Zone Weights: Analysis & Synthesis", h2_style))
     story.append(Paragraph(
-        "The grid search for Boolean Weighted Zone Scoring converged to <b>w*</b> = (<i>w<sub>T</sub></i>=0.55, <i>w<sub>A</sub></i>=0.05, <i>w<sub>B</sub></i>=0.40, <i>w<sub>W</sub></i>=0.00) under the MAP ranking objective. This reveals a profound IR insight:<br/>"
-        "• <b>Title (0.55) and Bibliography (0.40) carry the highest precision signal</b>. In the Cranfield corpus, almost every document body mentions generic fluid dynamics terms, leading to saturated boolean matches (<i>s<sub>body</sub></i> = 1) for almost all documents. Consequently, matching on the body provides near-zero discriminative power.<br/>"
-        "• In contrast, when a query keyword matches in the Title or Bibliographic citation (which references prior papers in the exact research lineage), it provides an exceptionally strong precision filter.<br/>"
-        "• Under MSE minimization, weights converged to (0.00, 0.90, 0.10, 0.00). Because relevance is rare (~0.6%), predicting small scores minimizes MSE, driving weights toward the rarest matching field (Author). This highlights why <i>direct ranking optimization</i> (MAP) is vastly superior to regression MSE for IR.",
+        "The grid search for Boolean Weighted Zone Scoring converged to <b>w*</b> = (<i>w<sub>T</sub></i>=" + f"{method_a_w[0]:.2f}" + ", <i>w<sub>A</sub></i>=" + f"{method_a_w[1]:.2f}" + ", <i>w<sub>B</sub></i>=" + f"{method_a_w[2]:.2f}" + ", <i>w<sub>W</sub></i>=" + f"{method_a_w[3]:.2f}" + ") under the MAP objective:<br/>"
+        "• <b>Title and body carry most weight, but bibliography and author are not negligible.</b> In Cranfield the bibliography field holds the venue/affiliation line and the author field is short, so a query term matching there is rare and therefore informative; the body, which also repeats the title, gives breadth.<br/>"
+        "• <b>Granularity matters more than the weights.</b> A single 'any query term occurs in the zone' bit saturates (nearly every body matches some query term) and produces massive ties: MAP " + f"{tAny['MAP']:.3f}" + " with weights (" + ", ".join(f"{x:.2f}" for x in wany) + "). Counting the Boolean matches per query term (a fraction in [0,1]) restores ordering information and lifts MAP to " + f"{tA['MAP']:.3f}" + " (CV: " + f"{cvAny['MAP']['mean']:.3f}" + " &rarr; " + f"{cvA['MAP']['mean']:.3f}" + ").<br/>"
+        "• <b>Train/inference consistency.</b> An earlier version optimised weights on an unordered-ties ranking but deployed a different tie-break; the learned weights were then meaningless. The final scorer uses one function for both stages.<br/>"
+        "• Zone scoring still trails VSM/BM25 (CV MAP " + f"{cvA['MAP']['mean']:.3f}" + " vs. " + f"{cvM['MAP']['mean']:.3f}" + ") because it has no tf, idf or length information.",
         body_style
     ))
     story.append(Spacer(1, 4))
@@ -741,12 +749,12 @@ def build_pdf_report(output_filename=None):
         "   • <code>dataset_parser.py</code>: Corpus and qrels parser with tokenization, stopword removal, and Porter stemming.<br/>"
         "   • <code>method_a_zone_scoring.py</code>: Boolean Weighted Zone Scorer with fast vectorized simplex grid search.<br/>"
         "   • <code>feature_extractor.py</code>: Vectorized extractor computing the exact 22 features.<br/>"
-        "   • <code>method_b_svm.py</code>: Linear SVM Learning to Rank with class balancing and coordinate descent.<br/>"
+        "   • <code>method_b_svm.py</code>: Linear SVM Learning to Rank (pointwise and pairwise RankSVM, RobustScaler, CV-tuned C).<br/>"
         "   • <code>evaluate.py</code>: Standard IR evaluation suite (P@K, R@K, F1@K, MAP, MRR, NDCG@K) and baselines.<br/>"
         "   • <code>main.py</code>: Unified pipeline executing experiments, cross-validation, and exporting results.<br/>"
         "   • <code>predict.py</code>: Standalone CLI prediction script ready to evaluate on unknown test queries:<br/>"
         "     <code>python predict.py --queries &lt;path_to_queries&gt; --output &lt;output_file&gt; --method svm</code><br/>"
-        "2. <b>Result Files:</b> Formatted text files containing top-100 ranked documents per test query:<br/>"
+        "2. <b>Result Files:</b> Formatted text files (qid, docid, rank, score) containing top-100 ranked documents per held-out test query; <code>predict.py</code> additionally writes a second file truncated at the F1-optimal cutoff K* for set-based evaluation:<br/>"
         "   • <code>results_method_a.txt</code>: 4,500 ranked lines for 45 test queries using Method A.<br/>"
         "   • <code>results_method_b.txt</code>: 4,500 ranked lines for 45 test queries using Method B.<br/>"
         "   • <code>results_bm25_baseline.txt</code>: 4,500 ranked lines for 45 test queries using BM25.<br/>"
@@ -757,7 +765,7 @@ def build_pdf_report(output_filename=None):
 
     story.append(Paragraph("6.5 Conclusion", h2_style))
     story.append(Paragraph(
-        "This project successfully designed, implemented, and benchmarked Boolean Weighted Zone Scoring and Linear SVM Learning to Rank on the Cranfield text collection. Method A demonstrated that title and bibliographic zones provide the highest discriminative precision in boolean scoring. Method B demonstrated that learning a maximal-margin hyperplane over 22 NLP and statistical features effectively combines BM25 term saturation, VSM cosine similarity, and maximum TF-IDF salience to produce high retrieval precision (P@5 = 0.3111, MRR = 0.5448). The resulting codebase and inference CLI provide a robust, optimized system engineered to achieve top performance on unknown test evaluation queries.",
+        "This project successfully designed, implemented, and benchmarked Boolean Weighted Zone Scoring and Linear SVM Learning to Rank on the Cranfield text collection. Method A shows that Boolean zone weights can be learned reliably by grid search once the zone input is the per-term Boolean match fraction (MAP " + f"{cvAny['MAP']['mean']:.3f}" + " &rarr; " + f"{cvA['MAP']['mean']:.3f}" + " in CV). Method B learns real-valued weights for 22 features; it matches BM25 and VSM (CV MAP " + f"{cvB['MAP']['mean']:.3f}" + " vs. " + f"{cvM['MAP']['mean']:.3f}" + " / " + f"{cvV['MAP']['mean']:.3f}" + ") but, as the features are all derived from the same term statistics, does not surpass them. Honest reporting: neither learned method significantly outperforms VSM on this collection. The resulting codebase and inference CLI provide a robust, optimized system engineered to achieve top performance on unknown test evaluation queries.",
         body_style
     ))
 

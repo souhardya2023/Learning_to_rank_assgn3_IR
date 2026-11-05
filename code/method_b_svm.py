@@ -1,13 +1,18 @@
 """
-method_b_svm.py - Method B: Learning Real-Valued Weights using Linear Support Vector Machines.
+method_b_svm.py - Method B: Learning real-valued weights with a linear SVM.
 
-Features:
-- Constructs training instances (X, y) from (query, document) pairs using the 22 features.
-- Balances class distribution with balanced weighting and informative negative sampling.
-- Robust feature scaling (RobustScaler) using median and IQR to resist heavy-tailed term distributions.
-- Trains Linear SVM (LinearSVC) with fast primal optimization (dual=False).
-- Ranks candidate documents using the real-valued decision score: S(q, d) = w^T x + b.
-- Inspects and exports learned feature weights.
+The 22 features of a (query, document) pair are scaled with a RobustScaler
+(median / IQR) and a linear SVM learns one real-valued weight per feature.
+Ranking score:  S(q, d) = w . phi(q, d) (+ b).
+
+Two training formulations (both linear SVMs, both learn w over the same 22 features):
+  * mode='point' : pointwise  - relevant vs. non-relevant (sampled) documents,
+                   class_weight='balanced'.
+  * mode='pair'  : pairwise   - RankSVM: for each relevant doc d+ and sampled
+                   non-relevant d-, the difference phi(d+) - phi(d-) is labelled +1
+                   (and the mirrored difference -1); no bias term.
+Mode, C and the negative-sampling ratio are chosen by inner k-fold cross-validation
+on the *training* queries only (maximising MAP).
 """
 
 import numpy as np
@@ -15,191 +20,133 @@ from sklearn.svm import LinearSVC
 from sklearn.preprocessing import RobustScaler
 from feature_extractor import FEATURE_NAMES
 
+
+def _ap(scores, y):
+    order = np.argsort(-scores, kind='stable')
+    h = y[order]
+    return float((np.cumsum(h) / np.arange(1, len(h) + 1) * h).sum() / y.sum())
+
+
 class SVMLearningToRank:
-    def __init__(self, corpus, extractor, C=0.005, random_state=42):
+    def __init__(self, corpus, extractor, C=0.005, mode='point', neg_ratio=3, random_state=42):
         self.corpus = corpus
         self.extractor = extractor
         self.C = C
+        self.mode = mode
+        self.neg_ratio = neg_ratio
         self.random_state = random_state
+        self.all_dids = sorted(corpus.docs.keys())
         self.scaler = RobustScaler(quantile_range=(25.0, 75.0))
-        self.model = LinearSVC(
-            C=self.C,
-            loss='squared_hinge',
-            dual=False,
-            class_weight='balanced',
-            max_iter=3000,
-            tol=1e-3,
-            random_state=self.random_state
-        )
+        self.model = None
         self.is_trained = False
         self.feature_weights = None
         self.intercept = 0.0
+        self._ycache = {}
 
-    def build_dataset(self, qids, neg_ratio=3, only_matching=True):
-        """
-        Builds (X, y, query_doc_meta) for the given query IDs.
-        For each query:
-        - Includes all relevant documents as positive examples (y=1).
-        - Samples negative examples from candidate non-relevant documents.
-        """
-        all_dids = sorted(self.corpus.docs.keys())
-        X_list = []
-        y_list = []
-        meta_list = []
+    # ------------------------------------------------------------------ data
+    def _xy(self, qid):
+        X, _ = self.extractor.extract_features_for_query(qid)
+        if qid not in self._ycache:
+            rel = self.corpus.get_relevant_docs(qid)
+            self._ycache[qid] = np.array([d in rel for d in self.all_dids], dtype=np.float32)
+        return X, self._ycache[qid]
 
-        for qid in qids:
-            rel_docs = self.corpus.get_relevant_docs(qid)
-            if not rel_docs:
+    def _fit_scaler(self, qids):
+        rows = []
+        for q in qids:
+            X, y = self._xy(q)
+            rows.append(X[(X[:, 1] > 0) | (y > 0)])
+        self.scaler.fit(np.vstack(rows))
+
+    def _build(self, qids, mode, neg_ratio):
+        rng = np.random.RandomState(self.random_state)
+        Xs, ys = [], []
+        for q in qids:
+            X, y = self._xy(q)
+            if y.sum() == 0:
                 continue
-            
-            q_tokens = set(self.corpus.query_tokens[qid])
-            pos_count = 0
-            
-            # Positives
-            for did in rel_docs:
-                feat = self.extractor.extract_features(qid, did)
-                X_list.append(feat)
-                y_list.append(1)
-                meta_list.append((qid, did))
-                pos_count += 1
-                
-            # Negatives: candidate non-relevant docs
-            non_rel_candidates = []
-            for did in all_dids:
-                if did in rel_docs:
-                    continue
-                if only_matching:
-                    d_tokens = set(self.corpus.doc_tokens[did]['all'])
-                    if bool(q_tokens & d_tokens):
-                        non_rel_candidates.append(did)
-                else:
-                    non_rel_candidates.append(did)
-                    
-            target_neg = min(len(non_rel_candidates), pos_count * neg_ratio)
-            rng = np.random.RandomState(self.random_state + qid)
-            if len(non_rel_candidates) > target_neg:
-                selected_negs = rng.choice(non_rel_candidates, size=target_neg, replace=False)
+            Z = self.scaler.transform(X)
+            pos = np.where(y > 0)[0]
+            negs = np.where((y == 0) & (X[:, 1] > 0))[0]          # candidates sharing >=1 term
+            if mode == 'point':
+                k = min(len(negs), neg_ratio * len(pos))
+                ch = rng.choice(negs, k, replace=False) if k else negs[:0]
+                Xs.append(Z[np.r_[pos, ch]])
+                ys.append(np.r_[np.ones(len(pos)), np.zeros(len(ch))])
             else:
-                selected_negs = non_rel_candidates
-                
-            for did in selected_negs:
-                feat = self.extractor.extract_features(qid, did)
-                X_list.append(feat)
-                y_list.append(0)
-                meta_list.append((qid, did))
-                
-        X = np.array(X_list, dtype=np.float32)
-        y = np.array(y_list, dtype=np.int32)
-        return X, y, meta_list
+                k = min(len(negs), neg_ratio)
+                if k == 0:
+                    continue
+                ch = np.stack([rng.choice(negs, k, replace=False) for _ in pos])   # (P, k)
+                D = (Z[pos][:, None, :] - Z[ch]).reshape(-1, Z.shape[1])
+                Xs.append(np.vstack([D, -D]))
+                ys.append(np.r_[np.ones(len(D)), np.zeros(len(D))])
+        return np.vstack(Xs), np.concatenate(ys)
 
-    def train(self, train_qids, neg_ratio=3, tune_C=False, val_qids=None):
-        """
-        Trains the Linear SVM on the training queries.
-        If tune_C is True and val_qids is provided, performs fast validation search over C.
-        """
-        X_train, y_train, _ = self.build_dataset(train_qids, neg_ratio=neg_ratio)
-        
-        # Fit scaler
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        
-        if tune_C and val_qids:
-            # Pre-scale validation matrices
-            all_dids = sorted(self.corpus.docs.keys())
-            val_matrices = {}
-            val_rels = {}
-            for qid in val_qids:
-                rels = self.corpus.get_relevant_docs(qid)
-                if rels:
-                    X_raw, _ = self.extractor.extract_features_for_query(qid, doc_ids=all_dids)
-                    val_matrices[qid] = self.scaler.transform(X_raw)
-                    val_rels[qid] = rels
-                    
-            best_c = self.C
-            best_map = -1.0
-            candidate_c = [0.001, 0.005, 0.01, 0.05, 0.1]
-            
-            for c_val in candidate_c:
-                temp_model = LinearSVC(
-                    C=c_val,
-                    loss='squared_hinge',
-                    dual=False,
-                    class_weight='balanced',
-                    max_iter=3000,
-                    tol=1e-3,
-                    random_state=self.random_state
-                )
-                temp_model.fit(X_train_scaled, y_train)
-                w = temp_model.coef_[0]
-                b = float(temp_model.intercept_[0])
-                
-                maps = []
-                for qid, X_val in val_matrices.items():
-                    rel_docs = val_rels[qid]
-                    scores = X_val @ w + b
-                    ranks = np.argsort(-scores)
-                    hits = 0
-                    ap = 0.0
-                    for rank, idx in enumerate(ranks, start=1):
-                        did = all_dids[idx]
-                        if did in rel_docs:
-                            hits += 1
-                            ap += hits / rank
-                    maps.append(ap / len(rel_docs))
-                avg_map = float(np.mean(maps)) if maps else 0.0
-                if avg_map > best_map:
-                    best_map = avg_map
-                    best_c = c_val
-                    
-            self.C = best_c
-            
-        self.model = LinearSVC(
-            C=self.C,
-            loss='squared_hinge',
-            dual=False,
-            class_weight='balanced',
-            max_iter=3000,
-            tol=1e-3,
-            random_state=self.random_state
-        )
-        self.model.fit(X_train_scaled, y_train)
-        self.is_trained = True
+    def _make_model(self, C, mode):
+        if mode == 'point':
+            return LinearSVC(C=C, loss='squared_hinge', dual=False, class_weight='balanced',
+                             max_iter=5000, tol=1e-4, random_state=self.random_state)
+        return LinearSVC(C=C, loss='squared_hinge', dual=False, fit_intercept=False,
+                         max_iter=5000, tol=1e-4, random_state=self.random_state)
+
+    def _fit(self, qids, C, mode, neg_ratio):
+        self._fit_scaler(qids)
+        Xt, yt = self._build(qids, mode, neg_ratio)
+        m = self._make_model(C, mode)
+        m.fit(Xt, yt)
+        return m, Xt, yt
+
+    # -------------------------------------------------------------- training
+    def tune(self, qids, modes=('point', 'pair'), Cs=(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1),
+             neg_ratios=(3, 10), folds=5):
+        """Inner k-fold CV over (mode, C, neg_ratio) maximising MAP on `qids` only."""
+        qids = list(qids)
+        splits = [qids[i::folds] for i in range(folds)]
+        results = {}
+        for mode in modes:
+            for nr in neg_ratios:
+                for C in Cs:
+                    aps = []
+                    for f in splits:
+                        tr = [q for q in qids if q not in f]
+                        m, _, _ = self._fit(tr, C, mode, nr)
+                        w = m.coef_[0]
+                        b = float(m.intercept_[0]) if mode == 'point' else 0.0
+                        for q in f:
+                            X, y = self._xy(q)
+                            if y.sum() == 0:
+                                continue
+                            aps.append(_ap(self.scaler.transform(X) @ w + b, y))
+                    results[(mode, nr, C)] = float(np.mean(aps))
+        best = max(results, key=results.get)
+        self.mode, self.neg_ratio, self.C = best
+        return {'best': best, 'cv_map': results[best],
+                'grid': {f"{k[0]}|neg{k[1]}|C{k[2]}": v for k, v in results.items()}}
+
+    def train(self, train_qids, C=None, mode=None, neg_ratio=None):
+        if C is not None: self.C = C
+        if mode is not None: self.mode = mode
+        if neg_ratio is not None: self.neg_ratio = neg_ratio
+        self.model, Xt, yt = self._fit(list(train_qids), self.C, self.mode, self.neg_ratio)
         self.feature_weights = self.model.coef_[0]
-        self.intercept = float(self.model.intercept_[0])
-        
-        return {
-            'C': self.C,
-            'weights': self.feature_weights,
-            'intercept': self.intercept,
-            'train_samples': len(y_train),
-            'positives': int(np.sum(y_train == 1)),
-            'negatives': int(np.sum(y_train == 0))
-        }
+        self.intercept = float(self.model.intercept_[0]) if self.mode == 'point' else 0.0
+        self.is_trained = True
+        return {'C': self.C, 'mode': self.mode, 'neg_ratio': self.neg_ratio,
+                'weights': self.feature_weights, 'intercept': self.intercept,
+                'train_samples': len(yt), 'positives': int(np.sum(yt == 1)),
+                'negatives': int(np.sum(yt == 0))}
 
+    # ------------------------------------------------------------- inference
     def score_docs(self, qid, doc_ids=None):
-        """
-        Computes SVM decision function score: S(q, d) = w^T * scaled_x + b
-        for all candidate docs, returning list of (doc_id, score) sorted descending.
-        """
         if not self.is_trained:
             raise RuntimeError("Model is not trained yet!")
-            
-        if doc_ids is None:
-            doc_ids = sorted(self.corpus.docs.keys())
-            
         X, d_ids = self.extractor.extract_features_for_query(qid, doc_ids=doc_ids)
-        X_scaled = self.scaler.transform(X)
-        
-        scores = self.model.decision_function(X_scaled)
-        
-        # Rank by decision score descending
-        ranked = list(zip(d_ids, [float(s) for s in scores]))
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        return ranked
+        s = self.scaler.transform(X) @ self.feature_weights + self.intercept
+        order = np.argsort(-s, kind='stable')
+        return [(d_ids[i], float(s[i])) for i in order]
 
     def get_feature_importances(self):
-        """
-        Returns dictionary of feature names mapped to learned weights.
-        """
         if not self.is_trained:
             return {}
-        return {name: float(w) for name, w in zip(FEATURE_NAMES, self.feature_weights)}
+        return {n: float(w) for n, w in zip(FEATURE_NAMES, self.feature_weights)}

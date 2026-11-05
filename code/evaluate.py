@@ -101,6 +101,35 @@ def evaluate_system(ranker_fn, corpus, eval_qids, cutoffs=(5, 10, 20)):
         summary[metric_name] = float(np.mean(values))
     return summary
 
+def choose_cutoff(ranker_fn, corpus, qids, max_k=50):
+    """Set-based operating point: the cutoff K in 1..max_k maximising mean F1 over qids."""
+    f1 = np.zeros(max_k)
+    n = 0
+    for qid in qids:
+        rel = corpus.get_relevant_docs(qid)
+        if not rel:
+            continue
+        ranked = ranker_fn(qid)
+        hit = np.cumsum([1.0 if d in rel else 0.0 for d, _ in ranked[:max_k]])
+        k = np.arange(1, max_k + 1)
+        p, r = hit / k, hit / len(rel)
+        f1 += np.where(p + r > 0, 2 * p * r / np.maximum(p + r, 1e-12), 0.0)
+        n += 1
+    return int(np.argmax(f1)) + 1
+
+def evaluate_at_cutoff(ranker_fn, corpus, qids, k):
+    """Macro-averaged set-based precision / recall / F1 of the top-k list of each query."""
+    P, R, F = [], [], []
+    for qid in qids:
+        rel = corpus.get_relevant_docs(qid)
+        if not rel:
+            continue
+        ranked = ranker_fn(qid)
+        P.append(precision_at_k(ranked, rel, k))
+        R.append(recall_at_k(ranked, rel, k))
+        F.append(f1_at_k(ranked, rel, k))
+    return {'K': k, 'P': float(np.mean(P)), 'R': float(np.mean(R)), 'F1': float(np.mean(F))}
+
 class BM25Baseline:
     def __init__(self, corpus, extractor):
         self.corpus = corpus
@@ -110,7 +139,7 @@ class BM25Baseline:
         all_dids = sorted(self.corpus.docs.keys())
         X, d_ids = self.extractor.extract_features_for_query(qid, doc_ids=all_dids)
         scores = X[:, 21]  # Index 21 is BM25
-        order = np.argsort(-scores)
+        order = np.argsort(-scores, kind='stable')
         return [(d_ids[i], float(scores[i])) for i in order]
 
 class VSMBaseline:
@@ -122,7 +151,7 @@ class VSMBaseline:
         all_dids = sorted(self.corpus.docs.keys())
         X, d_ids = self.extractor.extract_features_for_query(qid, doc_ids=all_dids)
         scores = X[:, 20]  # Index 20 is VSM Cosine
-        order = np.argsort(-scores)
+        order = np.argsort(-scores, kind='stable')
         return [(d_ids[i], float(scores[i])) for i in order]
 
 class UnweightedZoneBaseline:

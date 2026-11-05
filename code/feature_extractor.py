@@ -175,8 +175,8 @@ class FeatureExtractor:
         f18_mean_tfidf = float(np.mean(tfidf_arr)) if len(tfidf_arr) > 0 else 0.0
         f19_var_tfidf = float(np.var(tfidf_arr)) if len(tfidf_arr) > 0 else 0.0
         
-        # 20. boolean model (1.0 if matching terms > 0, else 0.0)
-        f20_boolean_model = 1.0 if matching_unique > 0 else 0.0
+        # 20. boolean model: conjunctive (AND) match - 1.0 iff every query term occurs in d
+        f20_boolean_model = 1.0 if matching_unique == len(unique_q_terms) else 0.0
         
         # 21. vector space model (cosine similarity)
         q_norm = math.sqrt(q_norm_sq) if q_norm_sq > 0 else 1.0

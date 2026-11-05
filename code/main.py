@@ -1,15 +1,14 @@
 """
-main.py - End-to-End Pipeline for Cranfield Learning to Rank (IR Assignment 3).
+main.py - End-to-end pipeline for Cranfield Learning to Rank (IR Assignment 3).
 
-Executes:
-1. Corpus and ground truth loading.
-2. Train/Test query splitting (80/20 split: 180 train, 45 test) and 5-fold cross-validation.
-3. Method A: Boolean Weighted Zone Scoring optimization via Grid Search.
-4. Method B: Linear SVM Learning to Rank with 22 features (Optimized with RobustScaler).
-5. Baselines: Unweighted Zone Scoring, VSM (TF-IDF Cosine), and Okapi BM25.
-6. Comprehensive evaluation: P@5, P@10, P@20, R@10, R@20, F1@10, F1@20, MAP, MRR, NDCG@10, NDCG@20.
-7. Generation of submission result files for test queries.
-8. Exporting results and metrics for reporting and analysis.
+1. Load corpus / judgments, 180/45 train/test query split (seed 42).
+2. Method A: Boolean weighted zone scoring, simplex grid search (MAP) on train queries.
+3. Method B: linear SVM on the 22 features; mode (pointwise / pairwise RankSVM), C and
+   negative ratio chosen by inner 5-fold CV on the train queries only.
+4. Baselines: unweighted zone, coarse 'any-term' zone (old variant), VSM, BM25.
+5. Held-out evaluation (rank metrics + set-based P/R/F1 at an F1-optimal cutoff K
+   selected on the training queries) and nested 5-fold CV over all 225 queries.
+6. Final models trained on all 225 queries (used by predict.py) and result files.
 """
 
 import os
@@ -18,197 +17,160 @@ import numpy as np
 from collections import defaultdict
 from dataset_parser import CranfieldCorpus
 from method_a_zone_scoring import BooleanWeightedZoneScorer
-from feature_extractor import FeatureExtractor, FEATURE_NAMES
+from feature_extractor import FeatureExtractor
 from method_b_svm import SVMLearningToRank
-from evaluate import (
-    evaluate_system,
-    BM25Baseline,
-    VSMBaseline,
-    UnweightedZoneBaseline
-)
+from evaluate import (evaluate_system, evaluate_at_cutoff, choose_cutoff,
+                      BM25Baseline, VSMBaseline, UnweightedZoneBaseline)
+
+CUTOFFS = (5, 10, 20)
+
 
 def run_experiments(seed=42):
-    print("=" * 75)
-    print("INFORMATION RETRIEVAL - ASSIGNMENT 3: LEARNING TO RANK (OPTIMIZED)")
-    print("=" * 75)
-    
-    # 1. Load Corpus
-    print("\n[Step 1] Loading Cranfield Corpus and Relevance Judgments...")
+    print("=" * 80)
+    print("INFORMATION RETRIEVAL - ASSIGNMENT 3: LEARNING TO RANK")
+    print("=" * 80)
     corpus = CranfieldCorpus()
-    print(f" -> Documents: {len(corpus.docs)}")
-    print(f" -> Queries: {len(corpus.queries)}")
-    print(f" -> Queries with relevance judgments: {len(corpus.qrels)}")
-    print(f" -> Vocabulary size: {len(corpus.df)} terms")
-    print(f" -> Average document length: {corpus.avg_doc_len:.2f} terms")
+    print(f"Docs={len(corpus.docs)} Queries={len(corpus.queries)} "
+          f"Judged={len(corpus.qrels)} Vocab={len(corpus.df)} AvgLen={corpus.avg_doc_len:.1f}")
 
-    # 2. Train/Test Split (80/20)
     all_qids = sorted(corpus.queries.keys())
     rng = np.random.RandomState(seed)
-    shuffled_qids = list(all_qids)
-    rng.shuffle(shuffled_qids)
-    
-    num_train = 180
-    train_qids = sorted(shuffled_qids[:num_train])
-    test_qids = sorted(shuffled_qids[num_train:])
-    print(f"\n[Step 2] Split: {len(train_qids)} Train queries, {len(test_qids)} Test queries")
+    shuf = list(all_qids)
+    rng.shuffle(shuf)
+    train_qids, test_qids = sorted(shuf[:180]), sorted(shuf[180:])
+    print(f"Split: {len(train_qids)} train / {len(test_qids)} test")
 
-    # Initialize components
     extractor = FeatureExtractor(corpus)
-    zone_scorer = BooleanWeightedZoneScorer(corpus)
-    
-    # Baselines
-    unweighted_zone = UnweightedZoneBaseline(zone_scorer)
-    vsm_baseline = VSMBaseline(corpus, extractor)
-    bm25_baseline = BM25Baseline(corpus, extractor)
+    zone = BooleanWeightedZoneScorer(corpus, mode='term')
+    zone_any = BooleanWeightedZoneScorer(corpus, mode='any')
+    unweighted = UnweightedZoneBaseline(zone)
+    vsm, bm25 = VSMBaseline(corpus, extractor), BM25Baseline(corpus, extractor)
 
-    # 3. Method A: Grid Search on Train Queries
-    print("\n[Step 3] Method A: Boolean Weighted Zone Scoring - Grid Search...")
-    grid_res = zone_scorer.grid_search_weights(train_qids, step=0.05, metric='MAP')
-    best_weights = grid_res['best_weights_ranking']
-    print(f" -> Best Learned Weights (Title, Author, Bib, Body): {best_weights}")
-    print(f" -> Training MAP with best weights: {grid_res['best_metric_score']:.4f}")
-    print(f" -> Best MSE Weights: {grid_res['best_weights_mse']} (MSE: {grid_res['best_mse_score']:.6f})")
+    # ---- Method A
+    print("\n[Method A] simplex grid search (step 0.05, 1771 candidates)")
+    ga = zone.grid_search_weights(train_qids, step=0.05)
+    wA = ga['best_weights_ranking']
+    print(f" term-level Boolean zones : w(T,A,B,W)={wA}  train MAP={ga['best_metric_score']:.4f}")
+    ga_any = zone_any.grid_search_weights(train_qids, step=0.05)
+    wA_any = ga_any['best_weights_ranking']
+    print(f" coarse any-term (ablation): w(T,A,B,W)={wA_any}  train MAP={ga_any['best_metric_score']:.4f}")
 
-    # 4. Method B: Linear SVM Learning to Rank (RobustScaler)
-    print("\n[Step 4] Method B: Linear SVM Learning to Rank (RobustScaler)...")
-    svm_ranker = SVMLearningToRank(corpus, extractor, C=0.005, random_state=seed)
-    # Split train_qids into sub-train (140) and validation (40) for C tuning
-    sub_train = train_qids[:140]
-    val_qids = train_qids[140:]
-    train_info = svm_ranker.train(sub_train, neg_ratio=3, tune_C=True, val_qids=val_qids)
-    print(f" -> Tuned SVM C: {train_info['C']}")
-    print(f" -> Training Samples: {train_info['train_samples']} ({train_info['positives']} pos, {train_info['negatives']} neg)")
-    print(f" -> Decision function intercept: {train_info['intercept']:.4f}")
-    
-    # Retrain on full train_qids with chosen C
-    svm_ranker.C = train_info['C']
-    full_info = svm_ranker.train(train_qids, neg_ratio=3, tune_C=False)
-    print(f" -> Retrained SVM on full {len(train_qids)} queries: {full_info['train_samples']} samples")
-    
-    # Learned feature weights
-    feature_importances = svm_ranker.get_feature_importances()
-    print("\nTop Positive Feature Weights:")
-    sorted_pos = sorted(feature_importances.items(), key=lambda x: x[1], reverse=True)[:7]
-    for name, w in sorted_pos:
-        print(f"  {name:45s}: +{w:.4f}")
+    # ---- Method B
+    print("\n[Method B] inner 5-fold CV over (mode, neg ratio, C) on train queries")
+    svm = SVMLearningToRank(corpus, extractor, random_state=seed)
+    tune = svm.tune(train_qids)
+    print(f" best={tune['best']}  inner-CV MAP={tune['cv_map']:.4f}")
+    info = svm.train(train_qids)
+    print(f" trained: {info['train_samples']} samples ({info['positives']} pos / {info['negatives']} neg)")
+    fi = svm.get_feature_importances()
+    for n, w in sorted(fi.items(), key=lambda x: -abs(x[1]))[:8]:
+        print(f"   {n:55s}{w:+.4f}")
 
-    # 5. Evaluation on Test Queries
-    print("\n[Step 5] Evaluating All Models on Held-Out Test Queries (N=45)...")
-    cutoffs = (5, 10, 20)
-    
     systems = {
-        "Unweighted Zone": unweighted_zone.rank,
-        "Method A (Weighted Zone)": lambda q: zone_scorer.score_docs(q, weights=best_weights),
-        "VSM (TF-IDF Cosine)": vsm_baseline.rank,
-        "Okapi BM25": bm25_baseline.rank,
-        "Method B (Linear SVM L2R)": svm_ranker.score_docs
+        "Unweighted Zone": unweighted.rank,
+        "Method A (Weighted Zone)": lambda q: zone.score_docs(q, weights=wA),
+        "Method A (coarse any-term)": lambda q: zone_any.score_docs(q, weights=wA_any),
+        "VSM (TF-IDF Cosine)": vsm.rank,
+        "Okapi BM25": bm25.rank,
+        "Method B (Linear SVM L2R)": svm.score_docs,
     }
-    
-    results = {}
+
+    # ---- held-out evaluation
+    print("\n[Held-out test, N=45]")
+    results, cutoff_results, best_k = {}, {}, {}
     for name, fn in systems.items():
-        print(f"  Evaluating {name}...")
-        metrics = evaluate_system(fn, corpus, test_qids, cutoffs=cutoffs)
-        results[name] = metrics
-
-    # Print Comparison Table
-    print("\n" + "=" * 105)
-    print(f"{'Model':<25} | {'P@5':<7} | {'P@10':<7} | {'P@20':<7} | {'R@10':<7} | {'R@20':<7} | {'F1@10':<7} | {'MAP':<7} | {'MRR':<7} | {'NDCG@10':<7}")
-    print("-" * 105)
+        results[name] = evaluate_system(fn, corpus, test_qids, cutoffs=CUTOFFS)
+        best_k[name] = choose_cutoff(fn, corpus, train_qids)
+        cutoff_results[name] = evaluate_at_cutoff(fn, corpus, test_qids, best_k[name])
+    hdr = f"{'Model':<28}|" + "|".join(f"{h:^8}" for h in
+          ["P@5", "P@10", "R@10", "F1@10", "MAP", "MRR", "NDCG@10"]) + "| K*  P/R/F1 @K*"
+    print(hdr)
     for name, m in results.items():
-        print(f"{name:<25} | {m['P@5']:<7.4f} | {m['P@10']:<7.4f} | {m['P@20']:<7.4f} | {m['R@10']:<7.4f} | {m['R@20']:<7.4f} | {m['F1@10']:<7.4f} | {m['MAP']:<7.4f} | {m['MRR']:<7.4f} | {m['NDCG@10']:<7.4f}")
-    print("=" * 105)
+        c = cutoff_results[name]
+        print(f"{name:<28}|" + "|".join(f"{m[k]:^8.4f}" for k in
+              ["P@5", "P@10", "R@10", "F1@10", "MAP", "MRR", "NDCG@10"])
+              + f"| {c['K']:>2}  {c['P']:.3f}/{c['R']:.3f}/{c['F1']:.3f}")
 
-    # 6. 5-Fold Cross Validation
-    print("\n[Step 6] Running 5-Fold Cross Validation across all 225 queries...")
-    kfold_folds = 5
-    fold_size = len(all_qids) // kfold_folds
-    cv_metrics = defaultdict(lambda: defaultdict(list))
-    
-    for fold in range(kfold_folds):
-        f_val = all_qids[fold * fold_size : (fold + 1) * fold_size]
-        f_tr = [q for q in all_qids if q not in f_val]
-        
-        # Method A on fold
-        f_zone_res = zone_scorer.grid_search_weights(f_tr, step=0.1, metric='MAP')
-        f_best_w = f_zone_res['best_weights_ranking']
-        m_a_eval = evaluate_system(lambda q: zone_scorer.score_docs(q, weights=f_best_w), corpus, f_val, cutoffs=cutoffs)
-        
-        # Method B on fold
-        f_svm = SVMLearningToRank(corpus, extractor, C=svm_ranker.C, random_state=seed + fold)
-        f_svm.train(f_tr, neg_ratio=3, tune_C=False)
-        m_b_eval = evaluate_system(f_svm.score_docs, corpus, f_val, cutoffs=cutoffs)
-        
-        # BM25 on fold
-        bm25_eval = evaluate_system(bm25_baseline.rank, corpus, f_val, cutoffs=cutoffs)
-        # VSM on fold
-        vsm_eval = evaluate_system(vsm_baseline.rank, corpus, f_val, cutoffs=cutoffs)
-        # Unweighted zone
-        unw_eval = evaluate_system(unweighted_zone.rank, corpus, f_val, cutoffs=cutoffs)
-        
-        for k, v in unw_eval.items():
-            cv_metrics["Unweighted Zone"][k].append(v)
-        for k, v in m_a_eval.items():
-            cv_metrics["Method A (Weighted Zone)"][k].append(v)
-        for k, v in vsm_eval.items():
-            cv_metrics["VSM (TF-IDF Cosine)"][k].append(v)
-        for k, v in bm25_eval.items():
-            cv_metrics["Okapi BM25"][k].append(v)
-        for k, v in m_b_eval.items():
-            cv_metrics["Method B (Linear SVM L2R)"][k].append(v)
-            
-    cv_summary = {}
-    print("\n5-Fold Cross Validation Summary (Mean +/- Std):")
-    print(f"{'Model':<25} | {'P@10 (Mean+/-Std)':<20} | {'R@10 (Mean+/-Std)':<20} | {'F1@10 (Mean+/-Std)':<20} | {'MAP (Mean+/-Std)':<20}")
-    print("-" * 95)
-    for model_name, met_dict in cv_metrics.items():
-        cv_summary[model_name] = {}
-        for met in met_dict.keys():
-            mean_v = float(np.mean(met_dict[met]))
-            std_v = float(np.std(met_dict[met]))
-            cv_summary[model_name][met] = {'mean': mean_v, 'std': std_v}
-        print(f"{model_name:<25} | {cv_summary[model_name]['P@10']['mean']:.4f} +/- {cv_summary[model_name]['P@10']['std']:.4f} | {cv_summary[model_name]['R@10']['mean']:.4f} +/- {cv_summary[model_name]['R@10']['std']:.4f} | {cv_summary[model_name]['F1@10']['mean']:.4f} +/- {cv_summary[model_name]['F1@10']['std']:.4f} | {cv_summary[model_name]['MAP']['mean']:.4f} +/- {cv_summary[model_name]['MAP']['std']:.4f}")
+    # ---- nested 5-fold CV
+    print("\n[5-fold CV over all 225 queries - A grid and B hyper-parameters re-tuned inside each fold]")
+    folds = [all_qids[i::5] for i in range(5)]
+    cv = defaultdict(lambda: defaultdict(list))
+    cv_cfg = []
+    for fi_, val in enumerate(folds):
+        tr = [q for q in all_qids if q not in val]
+        zf = BooleanWeightedZoneScorer(corpus, mode='term')
+        wf = zf.grid_search_weights(tr)['best_weights_ranking']
+        zfa = BooleanWeightedZoneScorer(corpus, mode='any')
+        wfa = zfa.grid_search_weights(tr)['best_weights_ranking']
+        sf = SVMLearningToRank(corpus, extractor, random_state=seed + fi_)
+        t = sf.tune(tr, Cs=(0.001, 0.005, 0.01, 0.05), neg_ratios=(3,), folds=3)
+        sf.train(tr)
+        cv_cfg.append({'fold': fi_, 'zone_w': wf, 'svm': list(t['best'])})
+        print(f" fold {fi_}: A w={wf}  B cfg={t['best']}")
+        fns = {
+            "Unweighted Zone": UnweightedZoneBaseline(zf).rank,
+            "Method A (Weighted Zone)": lambda q, zf=zf, wf=wf: zf.score_docs(q, weights=wf),
+            "Method A (coarse any-term)": lambda q, z=zfa, w=wfa: z.score_docs(q, weights=w),
+            "VSM (TF-IDF Cosine)": vsm.rank,
+            "Okapi BM25": bm25.rank,
+            "Method B (Linear SVM L2R)": sf.score_docs,
+        }
+        for name, fn in fns.items():
+            for k, v in evaluate_system(fn, corpus, val, cutoffs=CUTOFFS).items():
+                cv[name][k].append(v)
+    cv_summary = {n: {k: {'mean': float(np.mean(v)), 'std': float(np.std(v))} for k, v in d.items()}
+                  for n, d in cv.items()}
+    print(f"{'Model':<28}| P@10          | R@10          | F1@10         | MAP")
+    for n, d in cv_summary.items():
+        print(f"{n:<28}| " + " | ".join(f"{d[k]['mean']:.4f}±{d[k]['std']:.4f}" for k in ["P@10", "R@10", "F1@10", "MAP"]))
 
-    # 7. Generate Submission Result Files for Test Queries
-    print("\n[Step 7] Generating Result Files for Test Queries...")
-    
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    root_dir = os.path.dirname(script_dir)
-    results_dir = os.path.join(root_dir, 'results')
-    os.makedirs(results_dir, exist_ok=True)
+    # ---- result files (held-out test queries)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    rdir = os.path.join(root, 'results')
+    os.makedirs(rdir, exist_ok=True)
 
-    def save_results(ranker_fn, filename, top_k=100):
-        filepath = os.path.join(results_dir, filename)
-        with open(filepath, 'w') as f:
-            for qid in test_qids:
-                ranked = ranker_fn(qid)[:top_k]
-                for rank, (did, score) in enumerate(ranked, start=1):
-                    # Format: <query_id> <doc_id> <rank> <score>
-                    f.write(f"{qid}\t{did}\t{rank}\t{score:.6f}\n")
-        print(f" -> Saved {filepath} for {len(test_qids)} test queries.")
+    def save(fn, fname, top_k=100):
+        with open(os.path.join(rdir, fname), 'w') as f:
+            for q in test_qids:
+                for r, (d, s) in enumerate(fn(q)[:top_k], 1):
+                    f.write(f"{q}\t{d}\t{r}\t{s:.6f}\n")
+    save(systems["Method A (Weighted Zone)"], "results_method_a.txt")
+    save(systems["Method B (Linear SVM L2R)"], "results_method_b.txt")
+    save(systems["Okapi BM25"], "results_bm25_baseline.txt")
 
-    save_results(lambda q: zone_scorer.score_docs(q, weights=best_weights), "results_method_a.txt")
-    save_results(svm_ranker.score_docs, "results_method_b.txt")
-    save_results(bm25_baseline.rank, "results_bm25_baseline.txt")
+    # ---- final models on all 225 queries (consumed by predict.py)
+    print("\n[Final models on all 225 queries]")
+    zfin = BooleanWeightedZoneScorer(corpus, mode='term')
+    wA_final = zfin.grid_search_weights(all_qids)['best_weights_ranking']
+    sfin = SVMLearningToRank(corpus, extractor, random_state=seed)
+    tfin = sfin.tune(all_qids)
+    finfo = sfin.train(all_qids)
+    fcut = {"Method A (Weighted Zone)": choose_cutoff(lambda q: zfin.score_docs(q, weights=wA_final), corpus, all_qids),
+            "Method B (Linear SVM L2R)": choose_cutoff(sfin.score_docs, corpus, all_qids),
+            "Okapi BM25": choose_cutoff(bm25.rank, corpus, all_qids)}
+    print(f" A weights={wA_final}  B cfg={tfin['best']}  cutoffs={fcut}")
 
-    # 8. Save Experiment Metadata
-    exp_data = {
-        'seed': seed,
-        'train_qids': train_qids,
-        'test_qids': test_qids,
-        'method_a_weights': [float(x) for x in best_weights],
-        'method_b_weights': feature_importances,
-        'method_b_intercept': train_info['intercept'],
-        'method_b_C': train_info['C'],
-        'test_results': results,
-        'cv_summary': cv_summary
+    out = {
+        'seed': seed, 'train_qids': train_qids, 'test_qids': test_qids,
+        'method_a_weights': [float(x) for x in wA],
+        'method_a_any_weights': [float(x) for x in wA_any],
+        'method_a_train_map': ga['best_metric_score'],
+        'method_b_weights': fi, 'method_b_intercept': info['intercept'],
+        'method_b_C': info['C'], 'method_b_mode': info['mode'], 'method_b_neg_ratio': info['neg_ratio'],
+        'method_b_tuning': tune,
+        'test_results': results, 'cutoff_results': cutoff_results, 'best_k': best_k,
+        'cv_summary': cv_summary, 'cv_configs': cv_cfg,
+        'final': {'method_a_weights': [float(x) for x in wA_final],
+                  'method_b_mode': finfo['mode'], 'method_b_C': finfo['C'],
+                  'method_b_neg_ratio': finfo['neg_ratio'],
+                  'method_b_weights': sfin.get_feature_importances(),
+                  'cutoffs': fcut},
     }
-    json_path = os.path.join(results_dir, 'experiment_results.json')
-    with open(json_path, 'w') as f:
-        json.dump(exp_data, f, indent=2)
-    print(f" -> Saved {json_path} successfully.")
+    with open(os.path.join(rdir, 'experiment_results.json'), 'w') as f:
+        json.dump(out, f, indent=2)
+    print(" saved results/experiment_results.json")
+    return out
 
-    print("\nAll experiments completed successfully!")
-    return exp_data
 
 if __name__ == '__main__':
     run_experiments()

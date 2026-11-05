@@ -58,7 +58,7 @@ def generate_all_charts():
     ax.set_xticklabels(metrics, fontsize=10.5, fontweight='bold')
     ax.legend(frameon=True, facecolor='#f8f9fa', edgecolor='#cccccc', fontsize=9, loc='upper left')
     ax.grid(axis='y', linestyle='--', alpha=0.5)
-    ax.set_ylim(0, 0.65)
+    ax.set_ylim(0, 0.7)
     plt.tight_layout()
     chart1_path = os.path.join(CHARTS_DIR, 'model_comparison.png')
     plt.savefig(chart1_path)
@@ -119,10 +119,11 @@ def generate_all_charts():
     ax.set_title('Linear SVM Feature Weights Across 22 Learning to Rank Features', fontsize=11.5, fontweight='bold', pad=10)
     ax.axvline(0, color='black', linewidth=0.8, linestyle='-')
     ax.grid(axis='x', linestyle='--', alpha=0.5)
-    ax.set_xlim(-0.25, 0.38)
+    m = max(abs(v) for v in f_vals) * 1.3
+    ax.set_xlim(-m, m)
     
     for i, v in enumerate(f_vals):
-        if abs(v) > 0.07:
+        if abs(v) > 0.4 * max(abs(x) for x in f_vals):
             offset = 0.008 if v >= 0 else -0.045
             ax.text(v + offset, i, f"{v:+.3f}", va='center', fontsize=7.5, fontweight='bold', color='#111111')
             
@@ -137,19 +138,16 @@ def generate_all_charts():
     zones = ['Title (.T)', 'Author (.A)', 'Bib (.B)', 'Body (.W)']
     zone_colors = ['#3498db', '#9b59b6', '#f1c40f', '#e67e22']
     
-    # MAP optimal weights
     w_map = method_a_w
+    w_any = data['method_a_any_weights']
     ax1.pie(w_map, labels=zones, autopct='%1.1f%%', startangle=140, colors=zone_colors,
             textprops={'fontsize': 9, 'fontweight': 'bold'}, wedgeprops={'edgecolor': 'black', 'linewidth': 0.8})
-    ax1.set_title('Grid Search MAP Weights\n(Title=0.55, Author=0.05, Bib=0.40, Body=0.00)', fontsize=10, fontweight='bold')
-
-    # MSE optimal weights
-    w_mse = [0.0, 0.9, 0.1, 0.0]
-    ax2.pie(w_mse, labels=zones, autopct='%1.1f%%', startangle=140, colors=zone_colors,
+    ax1.set_title('Term-level Boolean zones (final)\nT=%.2f A=%.2f B=%.2f W=%.2f' % tuple(w_map), fontsize=10, fontweight='bold')
+    ax2.pie(w_any, labels=zones, autopct='%1.1f%%', startangle=140, colors=zone_colors,
             textprops={'fontsize': 9, 'fontweight': 'bold'}, wedgeprops={'edgecolor': 'black', 'linewidth': 0.8})
-    ax2.set_title('Minimum MSE Weights\n(Title=0.00, Author=0.90, Bib=0.10, Body=0.00)', fontsize=10, fontweight='bold')
+    ax2.set_title('Coarse any-term zones (ablation)\nT=%.2f A=%.2f B=%.2f W=%.2f' % tuple(w_any), fontsize=10, fontweight='bold')
 
-    plt.suptitle('Method A: Comparison of Learned Field Weights (MAP vs. MSE Objectives)', fontsize=11.5, fontweight='bold', y=1.02)
+    plt.suptitle('Method A: Learned Field Weights (MAP grid search)', fontsize=11.5, fontweight='bold', y=1.02)
     plt.tight_layout()
     chart4_path = os.path.join(CHARTS_DIR, 'zone_weights.png')
     plt.savefig(chart4_path)
