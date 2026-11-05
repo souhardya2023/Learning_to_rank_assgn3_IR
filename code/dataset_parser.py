@@ -64,9 +64,34 @@ def tokenize(text, stem=True, remove_stop=True):
     return result
 
 class CranfieldCorpus:
-    def __init__(self, cran_dir='cran', data_dir='data'):
-        self.cran_dir = cran_dir
-        self.data_dir = data_dir
+    def __init__(self, cran_dir=None, data_dir=None):
+        # Dynamically resolve cran_dir and data_dir based on project structure
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(script_dir)
+
+        if cran_dir is None:
+            candidates_cran = [
+                os.path.join(root_dir, 'data', 'cran'),
+                os.path.join('data', 'cran'),
+                os.path.join(root_dir, 'cran'),
+                'cran',
+                os.path.join('..', 'data', 'cran'),
+                os.path.join('..', 'cran')
+            ]
+            self.cran_dir = next((p for p in candidates_cran if os.path.isdir(p)), 'data/cran')
+        else:
+            self.cran_dir = cran_dir
+
+        if data_dir is None:
+            candidates_data = [
+                os.path.join(root_dir, 'data'),
+                'data',
+                os.path.join('..', 'data')
+            ]
+            self.data_dir = next((p for p in candidates_data if os.path.isdir(p)), 'data')
+        else:
+            self.data_dir = data_dir
+
         self.docs = {}          # doc_id -> {'title': str, 'author': str, 'bib': str, 'body': str}
         self.doc_tokens = {}    # doc_id -> {'title': list, 'author': list, 'bib': list, 'body': list, 'all': list}
         self.queries = {}       # qid -> query_str

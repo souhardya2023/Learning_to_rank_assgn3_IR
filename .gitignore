@@ -22,3 +22,8 @@ ENV/
 scratch/
 *.log
 .system_generated/
+
+# Reports (excluded from GitHub per assignment guidelines)
+report.pdf
+*.pdf
+!PA3.pdf

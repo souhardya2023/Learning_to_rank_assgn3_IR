@@ -65,8 +65,20 @@ class NumberedCanvas(canvas.Canvas):
         self.drawRightString(558, 30, page_str)
         self.restoreState()
 
-def build_pdf_report(output_filename="report.pdf"):
-    with open('experiment_results.json', 'r') as f:
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
+CHARTS_DIR = os.path.join(PROJECT_ROOT, 'report_charts')
+
+def build_pdf_report(output_filename=None):
+    if output_filename is None:
+        output_filename = os.path.join(PROJECT_ROOT, "report.pdf")
+
+    json_path = os.path.join(RESULTS_DIR, 'experiment_results.json')
+    if not os.path.exists(json_path):
+        json_path = 'experiment_results.json'
+
+    with open(json_path, 'r') as f:
         exp_data = json.load(f)
         
     test_res = exp_data['test_results']
@@ -207,10 +219,11 @@ def build_pdf_report(output_filename="report.pdf"):
     story.append(Paragraph("1. Group Details", h1_style))
     group_table_data = [
         [Paragraph("<b>Group Attribute</b>", table_header), Paragraph("<b>Details</b>", table_header)],
-        [Paragraph("<b>Course</b>", table_cell_left), Paragraph("Information Retrieval (CS60092 / IT40021)", table_cell_left)],
+        [Paragraph("<b>Course</b>", table_cell_left), Paragraph("Information Retrieval (CS60092)", table_cell_left)],
         [Paragraph("<b>Assignment</b>", table_cell_left), Paragraph("Programming Assignment III: Learning to Rank", table_cell_left)],
-        [Paragraph("<b>Student Name</b>", table_cell_left), Paragraph("Souhardya Sarkar", table_cell_left)],
-        [Paragraph("<b>Roll Number</b>", table_cell_left), Paragraph("21CS10064", table_cell_left)],
+        [Paragraph("<b>Group Name</b>", table_cell_left), Paragraph("<b>search-o-SAURS</b>", table_cell_left)],
+        [Paragraph("<b>Student Name</b>", table_cell_left), Paragraph("Souhardya Dandapat", table_cell_left)],
+        [Paragraph("<b>Roll Number</b>", table_cell_left), Paragraph("23CS30054", table_cell_left)],
         [Paragraph("<b>Department / Semester</b>", table_cell_left), Paragraph("Computer Science and Engineering / 7th Semester", table_cell_left)],
         [Paragraph("<b>Submission Date</b>", table_cell_left), Paragraph("November 6, 2026", table_cell_left)],
         [Paragraph("<b>Implementation Environment</b>", table_cell_left), Paragraph("Python 3.12, NumPy, Scikit-Learn, ReportLab (Self-Contained)", table_cell_left)]
@@ -220,11 +233,11 @@ def build_pdf_report(output_filename="report.pdf"):
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0d47a1')),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cfd8dc')),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f7fa')]),
-        ('TOPPADDING', (0, 0), (-1, -1), 2.5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 2.5),
+        ('TOPPADDING', (0, 0), (-1, -1), 1.8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 1.8),
     ]))
     story.append(g_tab)
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 5))
 
     # ABSTRACT / EXECUTIVE SUMMARY
     story.append(Paragraph("Executive Summary", h2_style))
@@ -365,7 +378,7 @@ def build_pdf_report(output_filename="report.pdf"):
     story.append(Spacer(1, 4))
 
     # Embedded Chart: Zone Weights
-    chart4_file = os.path.join('report_charts', 'zone_weights.png')
+    chart4_file = os.path.join(CHARTS_DIR, 'zone_weights.png')
     if os.path.exists(chart4_file):
         story.append(Image(chart4_file, width=470, height=185))
         story.append(Spacer(1, 2))
@@ -583,7 +596,7 @@ def build_pdf_report(output_filename="report.pdf"):
     story.append(Spacer(1, 5))
 
     # Embedded Chart: Overall Comparison
-    chart1_file = os.path.join('report_charts', 'model_comparison.png')
+    chart1_file = os.path.join(CHARTS_DIR, 'model_comparison.png')
     if os.path.exists(chart1_file):
         story.append(Image(chart1_file, width=470, height=210))
         story.append(Spacer(1, 3))
@@ -609,7 +622,7 @@ def build_pdf_report(output_filename="report.pdf"):
     ))
     story.append(Spacer(1, 2))
 
-    chart2_file = os.path.join('report_charts', 'cutoffs_comparison.png')
+    chart2_file = os.path.join(CHARTS_DIR, 'cutoffs_comparison.png')
     if os.path.exists(chart2_file):
         story.append(Image(chart2_file, width=470, height=145))
         story.append(Spacer(1, 2))
@@ -657,7 +670,7 @@ def build_pdf_report(output_filename="report.pdf"):
     story.append(cv_tab)
     story.append(Spacer(1, 5))
 
-    chart5_file = os.path.join('report_charts', 'cross_validation.png')
+    chart5_file = os.path.join(CHARTS_DIR, 'cross_validation.png')
     if os.path.exists(chart5_file):
         story.append(Image(chart5_file, width=460, height=150))
         story.append(Spacer(1, 2))
@@ -682,7 +695,7 @@ def build_pdf_report(output_filename="report.pdf"):
     ))
     story.append(Spacer(1, 2))
 
-    chart3_file = os.path.join('report_charts', 'svm_feature_weights.png')
+    chart3_file = os.path.join(CHARTS_DIR, 'svm_feature_weights.png')
     if os.path.exists(chart3_file):
         story.append(Image(chart3_file, width=470, height=230))
         story.append(Spacer(1, 2))

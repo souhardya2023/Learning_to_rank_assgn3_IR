@@ -14,11 +14,16 @@ plt.rcParams['font.sans-serif'] = 'DejaVu Sans'
 plt.rcParams['axes.edgecolor'] = '#333333'
 plt.rcParams['axes.linewidth'] = 0.8
 
-CHARTS_DIR = 'report_charts'
+script_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(script_dir)
+CHARTS_DIR = os.path.join(root_dir, 'report_charts')
 os.makedirs(CHARTS_DIR, exist_ok=True)
 
 def generate_all_charts():
-    with open('experiment_results.json', 'r') as f:
+    json_path = os.path.join(root_dir, 'results', 'experiment_results.json')
+    if not os.path.exists(json_path):
+        json_path = 'experiment_results.json'
+    with open(json_path, 'r') as f:
         data = json.load(f)
         
     test_results = data['test_results']

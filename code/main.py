@@ -34,7 +34,7 @@ def run_experiments(seed=42):
     
     # 1. Load Corpus
     print("\n[Step 1] Loading Cranfield Corpus and Relevance Judgments...")
-    corpus = CranfieldCorpus(cran_dir='cran', data_dir='data')
+    corpus = CranfieldCorpus()
     print(f" -> Documents: {len(corpus.docs)}")
     print(f" -> Queries: {len(corpus.queries)}")
     print(f" -> Queries with relevance judgments: {len(corpus.qrels)}")
@@ -171,14 +171,20 @@ def run_experiments(seed=42):
     # 7. Generate Submission Result Files for Test Queries
     print("\n[Step 7] Generating Result Files for Test Queries...")
     
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(script_dir)
+    results_dir = os.path.join(root_dir, 'results')
+    os.makedirs(results_dir, exist_ok=True)
+
     def save_results(ranker_fn, filename, top_k=100):
-        with open(filename, 'w') as f:
+        filepath = os.path.join(results_dir, filename)
+        with open(filepath, 'w') as f:
             for qid in test_qids:
                 ranked = ranker_fn(qid)[:top_k]
                 for rank, (did, score) in enumerate(ranked, start=1):
                     # Format: <query_id> <doc_id> <rank> <score>
                     f.write(f"{qid}\t{did}\t{rank}\t{score:.6f}\n")
-        print(f" -> Saved {filename} for {len(test_qids)} test queries.")
+        print(f" -> Saved {filepath} for {len(test_qids)} test queries.")
 
     save_results(lambda q: zone_scorer.score_docs(q, weights=best_weights), "results_method_a.txt")
     save_results(svm_ranker.score_docs, "results_method_b.txt")
@@ -196,9 +202,10 @@ def run_experiments(seed=42):
         'test_results': results,
         'cv_summary': cv_summary
     }
-    with open('experiment_results.json', 'w') as f:
+    json_path = os.path.join(results_dir, 'experiment_results.json')
+    with open(json_path, 'w') as f:
         json.dump(exp_data, f, indent=2)
-    print(" -> Saved experiment_results.json successfully.")
+    print(f" -> Saved {json_path} successfully.")
 
     print("\nAll experiments completed successfully!")
     return exp_data

@@ -58,23 +58,42 @@ def load_external_queries(query_path):
     return queries
 
 def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(script_dir)
+    default_results_dir = os.path.join(root_dir, 'results')
+    default_weights = os.path.join(default_results_dir, 'experiment_results.json')
+    if not os.path.exists(default_weights):
+        default_weights = 'experiment_results.json'
+
     parser = argparse.ArgumentParser(description="Evaluate on unknown test queries")
-    parser.add_argument('--queries', type=str, default='data/TEST/query.txt', help='Path to queries file')
-    parser.add_argument('--output', type=str, default='predictions.txt', help='Path to output file')
+    parser.add_argument('--queries', type=str, default=os.path.join(root_dir, 'data', 'TEST', 'query.txt'), help='Path to queries file')
+    parser.add_argument('--output', type=str, default=os.path.join(default_results_dir, 'predictions.txt'), help='Path to output file')
     parser.add_argument('--method', type=str, choices=['svm', 'zone', 'bm25'], default='svm', help='Method to use')
     parser.add_argument('--top_k', type=int, default=100, help='Number of documents per query')
-    parser.add_argument('--weights_file', type=str, default='experiment_results.json', help='Model weights file')
+    parser.add_argument('--weights_file', type=str, default=default_weights, help='Model weights file')
     args = parser.parse_args()
+
+    # Resolve query path if relative
+    if not os.path.exists(args.queries):
+        alt_q = os.path.join(root_dir, args.queries)
+        if os.path.exists(alt_q):
+            args.queries = alt_q
 
     print(f"Loading corpus and models for method: {args.method}...")
     corpus = CranfieldCorpus()
     extractor = FeatureExtractor(corpus)
 
     # Load trained parameters if available
-    weights_a = [0.15, 0.0, 0.05, 0.80]
-    best_c = 0.1
-    if os.path.exists(args.weights_file):
-        with open(args.weights_file, 'r') as f:
+    weights_a = [0.55, 0.05, 0.40, 0.00]
+    best_c = 0.005
+    weights_path = args.weights_file
+    if not os.path.exists(weights_path):
+        alt_w = os.path.join(default_results_dir, 'experiment_results.json')
+        if os.path.exists(alt_w):
+            weights_path = alt_w
+
+    if os.path.exists(weights_path):
+        with open(weights_path, 'r') as f:
             meta = json.load(f)
             weights_a = meta.get('method_a_weights', weights_a)
             best_c = meta.get('method_b_C', best_c)
